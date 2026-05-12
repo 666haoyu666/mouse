@@ -1,0 +1,5 @@
+# ROI UI 依赖
+# RK3588 上 rknnlite2 请按板卡环境单独安装，本文件不强行安装。
+PySide6>=6.5
+numpy
+opencv-python

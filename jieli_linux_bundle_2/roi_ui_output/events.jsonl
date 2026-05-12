@@ -1,0 +1,55 @@
+{"time": "2026-05-10T22:24:55", "event": "roi_dwell_alarm", "roi_id": 1, "roi_name": "roi_1", "dwell_time": 10.039, "threshold": 10.0, "det_count": 4}
+{"time": "2026-05-10T22:39:13", "event": "roi_dwell_alarm", "roi_id": 1, "roi_name": "roi_1", "dwell_time": 10.056, "threshold": 10.0, "det_count": 4}
+{"time": "2026-05-10T22:39:28", "event": "roi_dwell_alarm", "roi_id": 1, "roi_name": "roi_1", "dwell_time": 10.05, "threshold": 10.0, "det_count": 4}
+{"time": "2026-05-10T22:47:04", "event": "roi_dwell_alarm", "roi_id": 1, "roi_name": "roi_1", "dwell_time": 10.044, "threshold": 10.0, "det_count": 4}
+{"time": "2026-05-11T17:17:26", "event": "roi_dwell_alarm", "roi_id": 1, "roi_name": "roi_1", "dwell_time": 10.021, "threshold": 10.0, "det_count": 4}
+{"time": "2026-05-11T17:17:58", "event": "roi_dwell_alarm", "roi_id": 1, "roi_name": "roi_1", "dwell_time": 10.013, "threshold": 10.0, "det_count": 5}
+{"time": "2026-05-11T17:18:29", "event": "roi_dwell_alarm", "roi_id": 1, "roi_name": "roi_1", "dwell_time": 10.05, "threshold": 10.0, "det_count": 4}
+{"time": "2026-05-11T17:18:54", "event": "roi_dwell_alarm", "roi_id": 1, "roi_name": "roi_1", "dwell_time": 10.011, "threshold": 10.0, "det_count": 4}
+{"time": "2026-05-12T15:43:53", "event": "meeting_room_started", "started_at_ts": 1778571828.763, "trigger": "work_time", "roi_name": "roi_1", "work_period": "09:00-18:00"}
+{"time": "2026-05-12T15:43:58", "event": "meeting_room_long_use", "occupied_for_sec": 10.004, "threshold_sec": 10.0}
+{"time": "2026-05-12T15:44:08", "event": "meeting_room_abnormal_use", "occupied_for_sec": 20.06, "threshold_sec": 20.0, "started_in_work_time": true}
+{"time": "2026-05-12T15:44:23", "event": "meeting_room_released", "occupied_for_sec": 34.406, "work_period": "09:00-18:00"}
+{"time": "2026-05-12T15:46:01", "event": "meeting_room_nonwork_started", "started_at_ts": 1778571956.684, "trigger": "non_work_time", "roi_name": "roi_1", "work_period": "09:00-15:00"}
+{"time": "2026-05-12T15:46:11", "event": "meeting_room_abnormal_use", "occupied_for_sec": 15.026, "threshold_sec": 15.0, "started_in_work_time": false}
+{"time": "2026-05-12T15:46:32", "event": "meeting_room_released", "occupied_for_sec": 36.004, "work_period": "09:00-15:00"}
+{"time": "2026-05-12T16:02:59", "event": "roi_dwell_alarm", "roi_id": 1, "roi_name": "roi_1", "dwell_time": 10.03, "threshold": 10.0, "det_count": 4, "audio_id": 1}
+{"time": "2026-05-12T16:09:02", "event": "roi_dwell_alarm", "roi_id": 1, "roi_name": "roi_1", "dwell_time": 10.042, "threshold": 10.0, "det_count": 4, "audio_id": 1}
+{"time": "2026-05-12T16:14:33", "event": "roi_dwell_alarm", "roi_id": 1, "roi_name": "roi_1", "dwell_time": 10.007, "threshold": 10.0, "det_count": 5, "audio_id": 1}
+{"time": "2026-05-12T16:14:49", "event": "meeting_room_started", "started_at_ts": 1778573684.959, "trigger": "work_time", "roi_name": "roi_1", "work_period": "09:00-18:00"}
+{"time": "2026-05-12T16:14:55", "event": "meeting_room_long_use", "occupied_for_sec": 10.045, "threshold_sec": 10.0}
+{"time": "2026-05-12T16:15:04", "event": "meeting_room_abnormal_use", "occupied_for_sec": 20.015, "threshold_sec": 20.0, "started_in_work_time": true}
+{"time": "2026-05-12T16:15:23", "event": "meeting_room_released", "occupied_for_sec": 38.482, "work_period": "09:00-18:00"}
+{"time": "2026-05-12T16:23:00", "event": "meeting_room_nonwork_started", "started_at_ts": 1778574175.813, "trigger": "non_work_time", "roi_name": "roi_1", "work_period": "09:00-16:00"}
+{"time": "2026-05-12T16:23:10", "event": "meeting_room_abnormal_use", "occupied_for_sec": 15.024, "threshold_sec": 15.0, "repeat_sec": 10.0, "started_in_work_time": false}
+{"time": "2026-05-12T16:23:20", "event": "meeting_room_abnormal_use", "occupied_for_sec": 25.062, "threshold_sec": 15.0, "repeat_sec": 10.0, "started_in_work_time": false}
+{"time": "2026-05-12T16:23:30", "event": "meeting_room_abnormal_use", "occupied_for_sec": 35.107, "threshold_sec": 15.0, "repeat_sec": 10.0, "started_in_work_time": false}
+{"time": "2026-05-12T16:23:40", "event": "meeting_room_abnormal_use", "occupied_for_sec": 45.169, "threshold_sec": 15.0, "repeat_sec": 10.0, "started_in_work_time": false}
+{"time": "2026-05-12T16:23:52", "event": "meeting_room_released", "occupied_for_sec": 56.403, "work_period": "09:00-16:00"}
+{"time": "2026-05-12T16:34:41", "event": "meeting_room_nonwork_started", "started_at_ts": 1778574876.47, "trigger": "non_work_time", "roi_name": "roi_1", "work_period": "09:00-16:00"}
+{"time": "2026-05-12T16:34:47", "event": "meeting_room_released", "occupied_for_sec": 10.925, "work_period": "09:00-16:00"}
+{"time": "2026-05-12T16:38:48", "event": "meeting_room_nonwork_started", "started_at_ts": 1778575123.451, "trigger": "non_work_time", "roi_name": "roi_1", "work_period": "09:00-16:00"}
+{"time": "2026-05-12T16:38:58", "event": "meeting_room_released", "occupied_for_sec": 14.986, "work_period": "09:00-16:00", "was_abnormal": false}
+{"time": "2026-05-12T16:40:07", "event": "meeting_room_nonwork_started", "started_at_ts": 1778575202.924, "trigger": "non_work_time", "roi_name": "roi_1", "work_period": "09:00-16:00"}
+{"time": "2026-05-12T16:40:14", "event": "meeting_room_released", "occupied_for_sec": 11.937, "work_period": "09:00-16:00", "was_abnormal": false}
+{"time": "2026-05-12T16:53:42", "event": "meeting_room_nonwork_started", "started_at_ts": 1778576017.308, "trigger": "non_work_time", "roi_name": "roi_1", "work_period": "09:00-16:00"}
+{"time": "2026-05-12T16:53:51", "event": "meeting_room_released", "occupied_for_sec": 14.018, "work_period": "09:00-16:00", "was_abnormal": false, "started_in_work_time": false}
+{"time": "2026-05-12T16:54:00", "event": "meeting_room_nonwork_started", "started_at_ts": 1778576035.592, "trigger": "non_work_time", "roi_name": "roi_1", "work_period": "09:00-16:00"}
+{"time": "2026-05-12T16:54:10", "event": "meeting_room_abnormal_use", "occupied_for_sec": 15.052, "threshold_sec": 15.0, "repeat_sec": 10.0, "started_in_work_time": false}
+{"time": "2026-05-12T16:54:20", "event": "meeting_room_released", "occupied_for_sec": 24.617, "work_period": "09:00-16:00", "was_abnormal": true, "started_in_work_time": false}
+{"time": "2026-05-12T16:57:34", "event": "roi_dwell_alarm", "roi_id": 1, "roi_name": "roi_1", "dwell_time": 10.039, "threshold": 10.0, "det_count": 4, "audio_id": 1}
+{"time": "2026-05-12T16:58:07", "event": "meeting_room_nonwork_started", "started_at_ts": 1778576282.052, "trigger": "non_work_time", "roi_name": "roi_1", "work_period": "09:00-16:00"}
+{"time": "2026-05-12T16:58:17", "event": "meeting_room_released", "occupied_for_sec": 14.982, "work_period": "09:00-16:00", "started_in_work_time": false, "was_abnormal": false}
+{"time": "2026-05-12T17:21:24", "event": "meeting_room_nonwork_started", "started_at_ts": 1778577679.404, "trigger": "non_work_time", "roi_name": "roi_1", "work_period": "09:00-16:00"}
+{"time": "2026-05-12T17:21:35", "event": "meeting_room_released", "occupied_for_sec": 15.872, "work_period": "09:00-16:00", "started_in_work_time": false, "was_abnormal": false}
+{"time": "2026-05-12T17:28:46", "event": "meeting_room_started", "started_at_ts": 1778578120.957, "trigger": "work_time", "roi_name": "roi_1", "work_period": "09:00-18:00"}
+{"time": "2026-05-12T17:28:50", "event": "meeting_room_long_use", "occupied_for_sec": 10.015, "threshold_sec": 10.0}
+{"time": "2026-05-12T17:29:01", "event": "meeting_room_released", "occupied_for_sec": 20.366, "work_period": "09:00-18:00", "started_in_work_time": true, "was_abnormal": false}
+{"time": "2026-05-12T17:33:08", "event": "roi_dwell_alarm", "roi_id": 1, "roi_name": "roi_1", "dwell_time": 10.003, "threshold": 10.0, "det_count": 4, "audio_id": 1}
+{"time": "2026-05-12T17:34:33", "event": "meeting_room_started", "started_at_ts": 1778578468.029, "trigger": "work_time", "roi_name": "roi_1", "work_period": "09:00-18:00"}
+{"time": "2026-05-12T17:34:38", "event": "meeting_room_long_use", "occupied_for_sec": 10.003, "threshold_sec": 10.0}
+{"time": "2026-05-12T17:34:52", "event": "meeting_room_released", "occupied_for_sec": 24.143, "work_period": "09:00-18:00", "started_in_work_time": true, "was_abnormal": false}
+{"time": "2026-05-12T17:37:21", "event": "meeting_room_nonwork_started", "started_at_ts": 1778578636.348, "trigger": "non_work_time", "roi_name": "roi_1", "work_period": "09:00-17:00"}
+{"time": "2026-05-12T17:37:31", "event": "meeting_room_abnormal_use", "occupied_for_sec": 15.044, "threshold_sec": 15.0, "repeat_sec": 10.0, "started_in_work_time": false}
+{"time": "2026-05-12T17:37:41", "event": "meeting_room_abnormal_use", "occupied_for_sec": 25.09, "threshold_sec": 15.0, "repeat_sec": 10.0, "started_in_work_time": false}
+{"time": "2026-05-12T17:37:46", "event": "meeting_room_released", "occupied_for_sec": 30.45, "work_period": "09:00-17:00", "started_in_work_time": false, "was_abnormal": true}

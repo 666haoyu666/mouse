@@ -1,0 +1,30 @@
+{
+  "group_name": "rois",
+  "saved_at": "2026-05-12T16:23:53",
+  "frame_size": {
+    "width": 640,
+    "height": 480
+  },
+  "rois": [
+    {
+      "roi_id": 1,
+      "name": "roi_1",
+      "x1": 275,
+      "y1": 148,
+      "x2": 597,
+      "y2": 367,
+      "dwell_sec": 10.0,
+      "audio_id": 1,
+      "enabled": true,
+      "color": [
+        0,
+        255,
+        255
+      ],
+      "alarm_enabled": true
+    }
+  ],
+  "mode": "meeting",
+  "meeting_work_start": "09:00",
+  "meeting_work_end": "16:00"
+}
