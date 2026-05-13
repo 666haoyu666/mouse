@@ -1,99 +1,99 @@
-# AC79 → RK3588 空间占用检测系统（UDP + CTP + RKNN + ROI UI）
+# AC79 → Jetson Nano 空间占用检测系统
 
-本项目基于 **杰理 AC79 摄像头开发板 + RK3588**，实现从摄像头视频采集、UDP JPEG 传输、RK3588 RKNN 人体检测，到 ROI 区域驻留判断、会议室占用判断和本地音频播报的一体化空间占用检测系统。
-
-项目保留原有 AC79 UDP 视频流和 RK3588 RKNN 推理链路，在 RK3588 端新增 PySide6 图形界面，用于实时显示视频、绘制检测框、框选 ROI、保存/加载 ROI 组、设置默认报警逻辑和会议室模式逻辑。
+> UDP JPEG 视频流 + CTP 控制 + TensorRT YOLO 推理 + PySide6 ROI 图形界面  
+> 本 README 是面向 Jetson Nano / Orin Nano 的中文版说明，用于替代旧版 RK3588 / RKNN 工作流描述。
 
 ---
 
-## 1. 系统工作流程
+## 1. 项目简介
+
+本项目用于将 **杰理 AC79 摄像头开发板** 与 **Jetson Nano / Orin Nano** 连接起来，构建一个轻量化的空间占用检测与事件触发系统。
+
+AC79 负责摄像头采集和 UDP JPEG 视频流发送；Jetson Nano 负责接收 UDP 数据、重组 JPEG 帧、解码图像、运行 TensorRT YOLO 推理、显示检测结果、绘制 ROI 区域，并根据区域驻留规则触发报警或音频播放。
+
+当前 Nano 版本主要实现：
+
+- 接收 AC79 发送的 UDP JPEG 视频流。
+- 通过 CTP TCP 控制链路控制 AC79。
+- 使用 TensorRT `.engine` 模型进行 YOLO 目标检测。
+- 使用 PySide6 显示实时画面、检测框和 ROI 区域。
+- 支持鼠标拖拽绘制矩形 ROI。
+- 支持 ROI 分组保存和加载。
+- 使用检测框“底边中点”判断目标是否进入 ROI。
+- 支持 ROI 内连续驻留时间统计。
+- 支持普通 ROI 报警模式。
+- 支持会议室占用检测模式。
+- 支持通过 CTP 向 AC79 发送 `sd:1` ~ `sd:6` 音频播放命令。
+
+---
+
+## 2. 系统架构
 
 ```text
 AC79 摄像头开发板
     │
-    │  CTP 控制链路：app / date / open / sd:x / quit
+    │  CTP 控制链路
     │  TCP 3333
+    │  命令：app / date / open / sd:x / quit
     │
-    ├───────────────────────────────────────┐
-    │                                       │
-    │  UDP JPEG 视频流                       │
-    │  UDP 2224                              │
-    │                                       ▼
-RK3588 Linux
+    ├────────────────────────────────────────────┐
+    │                                            │
+    │  UDP JPEG 视频流                           │
+    │  UDP 2224                                  │
+    │                                            ▼
+Jetson Nano / Orin Nano
     │
-    ├─ UDP 收包
+    ├─ UDP 数据包接收
     ├─ JPEG 分片重组
     ├─ JPEG 解码为 OpenCV BGR 图像
-    ├─ RKNNLite 调用 YOLO 人体检测模型
-    ├─ PySide6 UI 实时显示视频、检测框、ROI
-    ├─ 使用人体检测框“底边中点”判断目标是否进入 ROI
-    ├─ 默认模式：按每个 ROI 的驻留阈值触发报警
-    ├─ 会议室模式：按统一会议室规则判断使用、空闲、长时间占用、异常占用
-    └─ 通过 CTP 发送 sd:1 ~ sd:6 指令，让 AC79 播放本地音频
+    ├─ TensorRT YOLO 推理
+    ├─ PySide6 实时视频显示
+    ├─ 检测框与 ROI 绘制
+    ├─ 底边中点进入 ROI 判断
+    ├─ 驻留时间统计
+    ├─ 普通 ROI 报警模式
+    ├─ 会议室占用检测模式
+    └─ 通过 CTP 发送 sd:x 命令，控制 AC79 本地音频播放
 ```
-
-### 1.1 视频链路
-
-1. RK3588 启动 UI。
-2. 点击 UI 的 **启动** 按钮。
-3. UI 启动 UDP/RKNN 工作线程，监听 UDP `2224`。
-4. UI 自动启动 `jieli_min_ctp_client.py --host 192.168.1.1`。
-5. UI 自动发送：
-
-```text
-app
-date
-open 640 480 20 8000 0
-```
-
-6. AC79 开始通过 UDP 发送 JPEG 视频流。
-7. RK3588 解码视频帧并进行 RKNN 人体检测。
-8. UI 显示实时画面、人体框、ROI 框和当前状态。
-
-> 注意：`open 640 480 20 8000 0` 最后一个参数建议保持为 `0`，当前 UI 收流和解码逻辑按 UDP JPEG 视频流处理。
-
-### 1.2 ROI 判断逻辑
-
-系统使用人体检测框的 **底边中点** 判断是否进入 ROI：
-
-```text
-bbox = (x1, y1, x2, y2)
-bottom_x = (x1 + x2) / 2
-bottom_y = y2
-```
-
-如果 `(bottom_x, bottom_y)` 落在某个 ROI 矩形区域内，则认为人员进入该 ROI。
-
-这种方式比使用检测框中心点更适合人体站立区域判断，因为底边中点更接近人的脚底位置。
 
 ---
 
-## 2. 目录结构
+## 3. 仓库目录结构
 
-建议 UI 文件放在 `jieli_linux_bundle` 下，这样可以直接复用原有的 CTP、UDP、RKNN 推理脚本和模型目录。
+当前仓库主要围绕 `jieli_linux_bundle_2` 目录展开：
 
 ```text
-ac79-rk3588/
+jetson-nano-jieli-ac79/
 ├── README.md
 ├── model/
-│   ├── person.rknn
-│   └── labels.txt
-└── jieli_linux_bundle/
+└── jieli_linux_bundle_2/
     ├── .env
     ├── .env.example
+    ├── .env.nano
     ├── .env.roi.example
+    ├── README.md
+    ├── README_LINUX.md
+    ├── README_NANO.md
     ├── jieli_min_ctp_client.py
     ├── jieli_min_udp_client.py
     ├── jieli_rknn_udp_infer.py
-    ├── run_roi_ui.py
-    ├── start_ctp.sh
-    ├── start_roi_ui_all.sh
-    ├── stop_roi_ui.sh
     ├── requirements.txt
     ├── requirements_ui.txt
+    ├── run_roi_ui.py
+    ├── setup_env.sh
+    ├── start_all.sh
+    ├── start_ctp.sh
+    ├── start_infer_all.sh
+    ├── start_roi_ui_all.sh
+    ├── start_roi_ui_nano.sh
+    ├── start_udp.sh
+    ├── stop_all.sh
+    ├── stop_roi_ui.sh
+    ├── scripts/
+    │   └── prepare_yolo_trt.sh
     ├── model/
-    │   ├── person.rknn
-    │   └── labels.txt
+    │   ├── yolo11n.engine
+    │   └── coco_labels.txt
     ├── roi_ui/
     │   ├── __init__.py
     │   ├── config.py
@@ -108,309 +108,326 @@ ac79-rk3588/
         └── screenshots/
 ```
 
----
-
-## 3. 环境准备
-
-### 3.1 硬件与网络
-
-确保：
-
-1. RK3588 已连接 AC79 板子的 WiFi，或两者处于同一局域网。
-2. RK3588 能访问 AC79 的 CTP 地址，默认通常是：
-
-```text
-192.168.1.1
-```
-
-3. AC79 UDP 视频流默认端口为：
-
-```text
-2224
-```
-
-4. RK3588 已安装并能正常使用 RKNNLite/RKNN 运行环境。
-
-### 3.2 安装 UI 依赖
-
-进入 `jieli_linux_bundle`：
-
-```bash
-cd ac79-rk3588/jieli_linux_bundle
-```
-
-安装 UI 依赖：
-
-```bash
-python3 -m pip install -r requirements_ui.txt
-```
-
-如果 RK3588 上 `opencv-python` 安装困难，而系统已经有 OpenCV，可以只安装 PySide6 和 numpy：
-
-```bash
-python3 -m pip install PySide6 numpy
-```
-
-> 注意：`rknnlite2` 或 `rknnlite` 建议使用你当前已经跑通 RKNN 推理的 Python 环境，不建议为了 UI 重新破坏原有 RKNN 环境。
+> 注意：部分文件名仍保留历史命名，例如 `jieli_rknn_udp_infer.py`。在 Nano 工作流中，关键是使用 `DETECTOR_BACKEND=tensorrt` 和 TensorRT `.engine` 模型。
 
 ---
 
-## 4. 配置文件 `.env`
+## 4. 硬件与网络准备
 
-可以从示例文件复制：
+### 4.1 硬件准备
 
-```bash
-cp .env.roi.example .env
-nano .env
+推荐硬件：
+
+- 杰理 AC79 摄像头开发板。
+- Jetson Nano 或 Orin Nano。
+- 如果使用本地图形界面，需要给 Jetson 连接显示器。
+- 如果需要播放 `sd:1` ~ `sd:6` 音频，需要 AC79 端 SD 卡中存在对应音频文件。
+
+### 4.2 网络准备
+
+需要确保 Jetson 能够和 AC79 正常通信。
+
+常见连接方式：
+
+```text
+AC79 作为 WiFi AP
+Jetson 连接 AC79 WiFi
+AC79 默认 IP：192.168.1.1
+CTP TCP 端口：3333
+UDP 视频端口：2224
 ```
 
-推荐配置：
+基础检查命令：
 
 ```bash
-# AC79 / UDP
-DEVICE_IP=192.168.1.1
-BIND_IP=0.0.0.0
-UDP_PORT=2224
-CLEANUP_TIMEOUT=3.0
-
-# RKNN 模型
-MODEL_PATH=./model/person.rknn
-LABELS_PATH=./model/labels.txt
-INPUT_WIDTH=640
-INPUT_HEIGHT=640
-OBJ_THRESH=0.25
-NMS_THRESH=0.45
-MAX_DET=10
-BGR_INPUT=1
-SINGLE_CORE=1
-AGNOSTIC_NMS=0
-
-# UI 输出
-ROI_JSON=./roi_ui_output/rois.json
-SCREENSHOT_DIR=./roi_ui_output/screenshots
-ROI_EVENT_LOG=./roi_ui_output/events.jsonl
-ALARM_CMD=
-
-# UI 模式：default 或 meeting
-UI_MODE=default
-
-# 会议室模式默认工作时间
-MEETING_WORK_START=09:00
-MEETING_WORK_END=18:00
-
-# 会议室模式阈值，单位秒
-MEETING_USE_START_SEC=60
-MEETING_RELEASE_EMPTY_SEC=30
-MEETING_LONG_USE_SEC=120
-MEETING_ABNORMAL_EXTRA_SEC=180
-MEETING_ABNORMAL_REPEAT_SEC=180
-MEETING_RELEASE_AUDIO_GAP_SEC=3
-
-# 会议室模式左上角显示文字
-MEETING_IDLE_TEXT=会议室空闲
-MEETING_BUSY_TEXT=会议室正在使用
-
-# 可选：视频流 watchdog，单位秒
-VIDEO_STALL_TIMEOUT_SEC=5
-VIDEO_REOPEN_COOLDOWN_SEC=8
-VIDEO_FULL_RESTART_SEC=20
+ping 192.168.1.1
+sudo ss -lunp | grep ':2224'
 ```
 
-### 4.1 配置注意事项
-
-#### `DEVICE_IP`
-
-默认 AC79 AP 地址通常是：
-
-```bash
-DEVICE_IP=192.168.1.1
-```
-
-如果 UI 能启动但一直没有画面，可以临时关闭来源 IP 过滤：
+如果 UI 能启动但没有画面，可以临时关闭来源 IP 过滤：
 
 ```bash
 DEVICE_IP=
 ```
 
-或者启动时传参：
+---
+
+## 5. 准备 TensorRT YOLO 模型
+
+Nano 版本使用 TensorRT engine，而不是 RKNN 模型。
+
+### 5.1 进入项目目录
 
 ```bash
-python3 run_roi_ui.py --device-ip empty
+cd /home/ubuntu/Desktop/AC791-RK3588_withUI_nano/jieli_linux_bundle_2
 ```
 
-#### `UDP_PORT`
+如果你的仓库路径不同，请替换成自己的实际路径。
 
-默认端口为：
+### 5.2 转换或准备 TensorRT engine
+
+使用仓库提供的辅助脚本：
 
 ```bash
+./scripts/prepare_yolo_trt.sh \
+  --pt /home/ubuntu/Desktop/yolo/yolo11n.pt \
+  --engine ./model/yolo11n.engine \
+  --imgsz 640
+```
+
+转换完成后检查 engine 是否存在：
+
+```bash
+ls -lh ./model/yolo11n.engine
+```
+
+如果使用自己的 YOLO 模型，可以生成新的 `.engine` 文件，然后在启动 UI 时通过 `--model` 参数指定模型路径。
+
+---
+
+## 6. Nano 配置文件说明
+
+Nano 专用配置文件是：
+
+```bash
+jieli_linux_bundle_2/.env.nano
+```
+
+推荐配置如下：
+
+```env
+DETECTOR_BACKEND=tensorrt
+MODEL_PATH=./model/yolo11n.engine
+LABELS_PATH=./model/coco_labels.txt
+
+INPUT_WIDTH=640
+INPUT_HEIGHT=640
+BGR_INPUT=0
+CLASS_FILTER=0
+
+OBJ_THRESH=0.25
+NMS_THRESH=0.45
+MAX_DET=10
+AGNOSTIC_NMS=0
+
+BIND_IP=0.0.0.0
 UDP_PORT=2224
+DEVICE_IP=192.168.1.1
+CLEANUP_TIMEOUT=3.0
+
+SCREENSHOT_DIR=./roi_ui_output/screenshots
+ROI_JSON=./roi_ui_output/rois.json
+ROI_EVENT_LOG=./roi_ui_output/events.jsonl
 ```
 
-不要同时运行多个监听 `2224` 的程序，例如：
+关键变量说明：
+
+| 变量 | 作用 |
+|---|---|
+| `DETECTOR_BACKEND=tensorrt` | 在 Jetson Nano / Orin Nano 上使用 TensorRT 后端。 |
+| `MODEL_PATH` | TensorRT `.engine` 模型路径。 |
+| `LABELS_PATH` | 类别标签文件路径。 |
+| `CLASS_FILTER=0` | 只检测 COCO 类别 0，通常是 person。 |
+| `BGR_INPUT=0` | TensorRT YOLO 通常使用 RGB 风格预处理。 |
+| `UDP_PORT=2224` | AC79 UDP JPEG 视频流端口。 |
+| `DEVICE_IP=192.168.1.1` | AC79 设备 IP。为空时不做来源 IP 过滤。 |
+| `ROI_JSON` | ROI 配置保存路径。 |
+| `ROI_EVENT_LOG` | 事件日志保存路径。 |
+
+---
+
+## 7. 安装依赖
+
+### 7.1 推荐方式
+
+优先使用 Nano 启动脚本，它会尝试创建项目虚拟环境并安装 UI 依赖：
 
 ```bash
-python3 jieli_rknn_udp_infer.py
-python3 jieli_min_udp_client.py
-python3 run_roi_ui.py
+cd jieli_linux_bundle_2
+chmod +x start_roi_ui_nano.sh
+./start_roi_ui_nano.sh --help
 ```
 
-ROI UI 已经内置 UDP 收流和 RKNN 推理，不需要再同时启动 `jieli_rknn_udp_infer.py`。
+脚本会使用：
 
-#### `DISPLAY`
+```bash
+.venv_nano/
+requirements_ui.txt
+.python_deps/runtime/
+```
 
-如果在 RK3588 LCD 上运行 UI，通常需要：
+如果系统中没有 `python3 -m venv`，脚本会回退到项目本地依赖目录。
+
+### 7.2 手动安装
+
+```bash
+python3 -m pip install -r requirements_ui.txt
+```
+
+如果 PySide6 安装较慢或失败，可以尝试清华源：
+
+```bash
+python3 -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple PySide6 numpy opencv-python
+```
+
+TensorRT、CUDA、JetPack 相关 Python 包建议优先使用 Jetson 系统自带版本。不要随意升级系统 CUDA 或 TensorRT，否则可能导致兼容性问题。
+
+---
+
+## 8. 启动系统
+
+### 8.1 推荐 Nano 启动方式
+
+```bash
+cd jieli_linux_bundle_2
+chmod +x start_roi_ui_nano.sh
+./start_roi_ui_nano.sh --model ./model/yolo11n.engine --class-filter 0
+```
+
+该启动脚本会设置 Nano 相关默认参数：
+
+```bash
+ENV_FILE=.env.nano
+DETECTOR_BACKEND=tensorrt
+BGR_INPUT=0
+CLASS_FILTER=0
+```
+
+### 8.2 使用其他 TensorRT engine 启动
+
+```bash
+./start_roi_ui_nano.sh \
+  --model ./model/best.engine \
+  --class-filter 0
+```
+
+### 8.3 显示相关设置
+
+如果使用本地显示器运行 UI：
 
 ```bash
 export DISPLAY=:0
 ```
 
-如果界面显示不全，可以临时设置缩放：
+如果 UI 界面太大：
 
 ```bash
 export QT_SCALE_FACTOR=0.75
 ```
 
-或者在代码中限制右侧控制区宽度。
+---
 
-#### 模型路径
+## 9. AC79 视频流工作流程
 
-确认模型文件存在：
+UI 启动后：
 
-```bash
-ls -lh ./model/person.rknn
-ls -lh ./model/labels.txt
+1. 点击 UI 中的 **Start**。
+2. 程序启动 UDP 接收和推理线程。
+3. 程序启动或调用 CTP 控制流程。
+4. 向 AC79 发送以下命令：
+
+```text
+app
+date
+open 640 480 20 8000 0
 ```
 
-确认 RKNNLite 可导入：
+5. AC79 通过 UDP 端口 `2224` 发送 JPEG 视频帧。
+6. Jetson 解码视频帧并运行 TensorRT YOLO 推理。
+7. UI 显示实时画面、检测框、ROI 和当前状态。
 
-```bash
-python3 -c "from rknnlite.api import RKNNLite; print('rknn ok')"
+推荐使用的 `open` 命令：
+
+```text
+open 640 480 20 8000 0
 ```
+
+最后一个参数建议保持为 `0`，因为当前接收逻辑主要围绕 UDP JPEG 视频流设计。
 
 ---
 
-## 5. 启动方式
+## 10. ROI 判断逻辑
 
-### 5.1 推荐启动
+系统使用检测框的 **底边中点** 判断目标是否进入 ROI。
 
-```bash
-cd ac79-rk3588/jieli_linux_bundle
-export DISPLAY=:0
-python3 run_roi_ui.py --device-ip 192.168.1.1
+对于检测框：
+
+```python
+bbox = (x1, y1, x2, y2)
+bottom_x = (x1 + x2) / 2
+bottom_y = y2
 ```
 
-打开 UI 后点击 **启动**。
+如果 `(bottom_x, bottom_y)` 落在某个 ROI 矩形内部，就认为该目标进入了该 ROI。
 
-点击启动后，UI 会自动：
-
-1. 启动 UDP/RKNN 工作线程；
-2. 监听 UDP `2224`；
-3. 启动 CTP 客户端；
-4. 发送 `app`、`date`、`open 640 480 20 8000 0`；
-5. 接收 AC79 UDP JPEG 视频流；
-6. 调用 RKNN 模型进行人体检测；
-7. 在 LCD/UI 上显示视频、人体框、ROI 和状态。
-
-### 5.2 使用脚本启动
-
-```bash
-chmod +x run_roi_ui.py start_roi_ui_all.sh stop_roi_ui.sh
-./start_roi_ui_all.sh
-```
-
-如果 `start_roi_ui_all.sh` 已经会先调用 `start_ctp.sh`，而 UI 本身也会在点击启动时自动开流，建议避免重复开流。可以在 `.env` 中设置：
-
-```bash
-START_CTP=0
-```
-
-然后再执行：
-
-```bash
-./start_roi_ui_all.sh
-```
+相比使用检测框中心点，底边中点更接近人的脚部位置，更适合判断“人是否真正站在某个区域内”。
 
 ---
 
-## 6. UI 使用流程
+## 11. 普通 ROI 报警模式
 
-### 6.1 默认模式
-
-默认模式用于普通 ROI 驻留报警。
+普通模式适合一般区域驻留报警。
 
 操作流程：
 
 ```text
 启动 UI
 ↓
-点击“启动”
+点击 Start
 ↓
-选择“默认模式”
+选择 Default Mode
 ↓
-点击“进入编辑”
+进入 ROI 编辑
 ↓
-在视频画面中拖拽创建 ROI
+在视频画面上拖拽创建 ROI
 ↓
-弹出音频选择框，选择 sd:1 ~ sd:6
+选择报警音频 sd:1 ~ sd:6
 ↓
-在 ROI 列表中选择 ROI
+在 ROI 列表中选择该 ROI
 ↓
-设置名称、驻留阈值、报警音频
+设置 ROI 名称、驻留阈值和报警音频
 ↓
-点击“应用ROI”
+点击 Apply ROI
 ↓
-点击“保存组”
+保存 ROI Group
 ```
 
-默认模式逻辑：
+报警逻辑：
 
 ```text
-人员进入某个 ROI
+目标进入 ROI
 ↓
-持续驻留时间 >= 该 ROI 的 dwell_sec
+连续驻留时间 >= dwell_sec
 ↓
 保存报警截图
 ↓
 写入事件日志
 ↓
-通过 CTP 发送对应 sd:x 音频指令
+通过 CTP 向 AC79 发送 sd:x 音频命令
 ```
 
-默认模式下，每个 ROI 可以有独立的：
+每个 ROI 都可以独立配置：
 
-- 名称；
-- 驻留阈值；
+- ROI 名称。
+- 驻留时间阈值。
 - 报警音频编号。
 
-### 6.2 会议室模式
+---
 
-会议室模式用于判断会议室是否正在使用、是否长时间占用、是否异常占用。
+## 12. 会议室模式
 
-进入会议室模式时，会弹出工作时间设置框，使用 24 小时制，只设置一个时间段。
+会议室模式用于判断会议室是否处于占用、空闲、长时间占用或异常占用状态。
 
-会议室模式下：
-
-- 创建 ROI 时不选择音频；
-- 不显示单个 ROI 的驻留阈值；
-- 不允许设置单个 ROI 的阈值；
-- ROI 可以创建多个；
-- 会议室正在使用时，不允许删除或清空已有 ROI，但允许继续新增 ROI；
-- 画面左上角显示会议室状态：
-  - 绿色：`会议室空闲`
-  - 红色：`会议室正在使用`
-
-会议室模式逻辑：
-
-#### 工作时间内
+### 12.1 工作时间内
 
 ```text
-人员进入任意 ROI
+有人进入任意 ROI
 ↓
 连续驻留 >= MEETING_USE_START_SEC
 ↓
-播放 sd:1 “会议室已开始使用”
+播放 sd:1 “会议室开始使用”
 ↓
-左上角显示红色“会议室正在使用”
+显示“会议室使用中”
 ```
 
 如果持续占用：
@@ -418,7 +435,7 @@ START_CTP=0
 ```text
 占用时间 >= MEETING_LONG_USE_SEC
 ↓
-播放 sd:3 “当前会议室已被长时间占用，请注意使用时长”
+播放 sd:3 “长时间占用提醒”
 ```
 
 如果继续占用：
@@ -426,41 +443,35 @@ START_CTP=0
 ```text
 占用时间 >= MEETING_LONG_USE_SEC + MEETING_ABNORMAL_EXTRA_SEC
 ↓
-播放 sd:6 “异常占用持续，请管理员介入”
+播放 sd:6 “异常占用持续”
 ```
 
-异常占用后，如果仍然持续占用，每隔：
+进入异常占用后，`sd:6` 可以按照 `MEETING_ABNORMAL_REPEAT_SEC` 间隔重复播放。
 
-```bash
-MEETING_ABNORMAL_REPEAT_SEC
-```
-
-再次播放 `sd:6`。
-
-释放会议室：
+释放逻辑：
 
 ```text
-已开始使用后，ROI 内连续 MEETING_RELEASE_EMPTY_SEC 秒无人
+会议室开始使用后，ROI 内无人持续 MEETING_RELEASE_EMPTY_SEC
 ↓
-播放 sd:2 “会议室已空闲”
+播放 sd:2 “会议室空闲”
 ↓
-等待 MEETING_RELEASE_AUDIO_GAP_SEC 秒
+等待 MEETING_RELEASE_AUDIO_GAP_SEC
 ↓
-播放 sd:4 “会议室无人，请关闭设备”
+播放 sd:4 “房间已空，请关闭设备”
 ↓
-左上角显示绿色“会议室空闲”
+显示“会议室空闲”
 ```
 
-#### 非工作时间内
+### 12.2 非工作时间
 
 ```text
-人员进入任意 ROI
+有人进入任意 ROI
 ↓
 连续驻留 >= MEETING_USE_START_SEC
 ↓
-播放 sd:5 “当前为非工作时间，请尽快离开会议室”
+播放 sd:5 “非工作时间，请离开”
 ↓
-左上角显示红色“会议室正在使用”
+显示“会议室使用中”
 ```
 
 如果继续占用：
@@ -468,143 +479,121 @@ MEETING_ABNORMAL_REPEAT_SEC
 ```text
 占用时间 >= MEETING_USE_START_SEC + MEETING_ABNORMAL_EXTRA_SEC
 ↓
-播放 sd:6 “异常占用持续，请管理员介入”
+播放 sd:6 “异常占用持续”
 ```
 
-异常占用后，如果仍然持续占用，每隔：
+非工作时间释放逻辑：
+
+```text
+ROI 内无人持续 MEETING_RELEASE_EMPTY_SEC
+↓
+只播放 sd:4
+↓
+不播放 sd:2
+↓
+显示“会议室空闲”
+```
+
+---
+
+## 13. AC79 音频命令映射
+
+| 编号 | 命令 | 含义 |
+|---|---|---|
+| 1 | `sd:1` | 会议室开始使用 |
+| 2 | `sd:2` | 会议室空闲 |
+| 3 | `sd:3` | 长时间占用提醒 |
+| 4 | `sd:4` | 房间已空，请关闭设备 |
+| 5 | `sd:5` | 非工作时间提醒 |
+| 6 | `sd:6` | 异常占用持续提醒 |
+
+普通模式下，可以为每个 ROI 手动选择 `sd:1` ~ `sd:6`。  
+会议室模式下，系统会根据当前状态自动选择音频。
+
+---
+
+## 14. ROI 保存与加载
+
+点击 **Save Group** 可以保存当前所有 ROI 到 JSON 文件。
+
+默认路径：
 
 ```bash
-MEETING_ABNORMAL_REPEAT_SEC
-```
-
-再次播放 `sd:6`。
-
-非工作时间释放会议室：
-
-```text
-ROI 内连续 MEETING_RELEASE_EMPTY_SEC 秒无人
-↓
-只播放 sd:4 “会议室无人，请关闭设备”
-↓
-不播放 sd:2 “会议室已空闲”
-↓
-左上角显示绿色“会议室空闲”
-```
-
----
-
-## 7. 音频编号说明
-
-AC79 SD 卡音频编号约定：
-
-| 编号 | 命令 | 内容 |
-|---:|---|---|
-| 1 | `sd:1` | 会议室已开始使用 |
-| 2 | `sd:2` | 会议室已空闲 |
-| 3 | `sd:3` | 当前会议室已被长时间占用，请注意使用时长 |
-| 4 | `sd:4` | 会议室无人，请关闭设备 |
-| 5 | `sd:5` | 当前为非工作时间，请尽快离开会议室 |
-| 6 | `sd:6` | 异常占用持续，请管理员介入 |
-
-默认模式下，创建 ROI 时可选择 `1 ~ 6` 中任意音频作为该 ROI 的报警音频。
-
-会议室模式下，不需要手动选择音频，系统根据会议室状态自动播放对应音频。
-
----
-
-## 8. ROI 组保存与加载
-
-点击 **保存组** 会把当前多个 ROI 一次性保存到 JSON 文件。
-
-点击 **加载组** 会一次性加载上次保存的多个 ROI。
-
-ROI 文件默认路径：
-
-```text
 ./roi_ui_output/rois.json
 ```
 
 保存内容包括：
 
-- ROI 名称；
-- ROI 坐标；
-- 默认模式下的驻留阈值；
-- 默认模式下的音频编号；
-- frame_size；
-- group_name；
-- saved_at；
-- 会议室工作时间元信息。
+- ROI 名称。
+- ROI 坐标。
+- 普通模式下的驻留阈值。
+- 普通模式下的音频编号。
+- `frame_size`。
+- `group_name`。
+- `saved_at`。
+- 会议室工作时间相关信息。
 
-注意：ROI 坐标保存的是原始视频帧坐标，不是 UI 缩放后的显示坐标。如果 AC79 输出分辨率改变，建议重新框选 ROI 并保存。
+注意：ROI 坐标保存的是原始视频帧坐标，不是 UI 缩放后的显示坐标。如果 AC79 输出分辨率发生变化，需要重新绘制并保存 ROI。
 
 ---
 
-## 9. 视频流断连与自动恢复
+## 15. 视频流看门狗与恢复机制
 
-如果视频流断连，UI 画面可能停留在最后一帧，看起来像“画面静止”。常见原因包括：
+如果视频卡住，可能原因包括：
 
-- AC79 停止发送 UDP 视频；
-- CTP 控制链路断开；
-- WiFi 短暂波动；
-- UDP 分片丢失；
-- AC79 端开流状态丢失。
+- AC79 停止发送 UDP 视频。
+- CTP 控制链路断开。
+- WiFi 波动。
+- UDP 丢包严重。
+- AC79 推流状态异常。
 
-推荐在 UI 中加入 watchdog 机制，定期检查最后一帧更新时间。
+推荐看门狗参数：
 
-建议参数：
-
-```bash
+```env
 VIDEO_STALL_TIMEOUT_SEC=5
 VIDEO_REOPEN_COOLDOWN_SEC=8
 VIDEO_FULL_RESTART_SEC=20
 ```
 
-处理策略：
+恢复策略：
 
 ```text
 超过 VIDEO_STALL_TIMEOUT_SEC 没有新帧
 ↓
 重新发送 app / date / open 640 480 20 8000 0
 ↓
-如果仍然超过 VIDEO_FULL_RESTART_SEC 没恢复
+如果超过 VIDEO_FULL_RESTART_SEC 仍然没有新帧
 ↓
-重启 UDP/RKNN worker
+重启 UDP/TensorRT worker
 ↓
-再次发送 open 开流命令
+再次发送 open 命令
 ```
-
-这样可以减少手动点击“停止 → 启动”的次数。
 
 ---
 
-## 10. 常见问题
+## 16. 常见问题排查
 
-### 10.1 UI 显示“等待 UDP 视频流”
+### 16.1 UI 显示 “waiting for UDP video stream”
 
 检查：
 
-1. RK3588 是否连接 AC79 WiFi。
-2. `DEVICE_IP` 是否正确。
-3. `UDP_PORT` 是否为 `2224`。
-4. 是否点击了 UI 的 **启动** 按钮。
-5. AC79 是否成功收到 `open 640 480 20 8000 0`。
-6. 是否有其它程序占用了 UDP `2224`。
-
-可以检查端口：
-
 ```bash
+ping 192.168.1.1
 sudo ss -lunp | grep ':2224'
+python3 jieli_min_udp_client.py --port 2224 --device-ip 192.168.1.1
 ```
 
-如果没有 `ss`，可用：
+同时确认：
 
-```bash
-sudo lsof -i:2224
-```
+- Jetson 已连接 AC79 WiFi 或处于同一局域网。
+- `DEVICE_IP` 配置正确。
+- `UDP_PORT=2224`。
+- AC79 已收到 `open 640 480 20 8000 0` 命令。
+- 没有其他程序占用 UDP `2224`。
 
-### 10.2 不能同时运行哪些程序
+### 16.2 UDP 2224 端口被占用
 
-不要同时运行：
+不要同时运行以下程序：
 
 ```bash
 python3 jieli_rknn_udp_infer.py
@@ -612,126 +601,122 @@ python3 jieli_min_udp_client.py
 python3 run_roi_ui.py
 ```
 
-因为它们可能都会尝试监听 UDP `2224`。
+检查并结束旧进程：
 
-### 10.3 CTP 音频不播放
+```bash
+sudo lsof -i:2224
+sudo kill -9 <PID>
+```
+
+### 16.3 TensorRT engine 无法加载
 
 检查：
 
-1. AC79 SD 卡中是否存在对应音频。
-2. 手动运行 CTP 客户端时，`sd:1` ~ `sd:6` 是否能播放。
-3. UI 日志是否显示 `已发送杰理音频命令: sd:x`。
-4. CTP 进程是否仍然存活。
-5. 是否在发送音频前 CTP 已经断开。
+```bash
+ls -lh ./model/yolo11n.engine
+```
 
-可查看：
+确保 `.engine` 是在当前 Jetson 设备、JetPack、CUDA、TensorRT 版本和模型输入尺寸下生成的。TensorRT engine 通常不能跨设备或跨 TensorRT 版本直接复用。
+
+### 16.4 检测类别不正确
+
+如果使用 COCO 标签做人检测，保持：
+
+```env
+CLASS_FILTER=0
+```
+
+如果是自己训练的模型，需要根据自己的类别顺序修改 `LABELS_PATH` 和 `CLASS_FILTER`。
+
+### 16.5 ROI 位置不准确
+
+系统保存的是原始视频帧坐标。如果将：
+
+```text
+open 640 480 20 8000 0
+```
+
+改成其他分辨率，需要重新绘制并保存 ROI。
+
+### 16.6 PySide6 安装失败
+
+可以尝试：
+
+```bash
+python3 -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple PySide6 numpy
+```
+
+如果 Jetson 上 `opencv-python` 安装失败，优先使用系统自带 OpenCV。
+
+### 16.7 AC79 音频不播放
+
+检查：
 
 ```bash
 cat roi_ui_output/ctp_auto.log
 ```
 
-### 10.4 UI 显示不全
+同时确认：
 
-可以临时设置：
-
-```bash
-export QT_SCALE_FACTOR=0.75
-```
-
-也可以在代码中限制右侧面板宽度，例如：
-
-```python
-side.setMinimumWidth(220)
-side.setMaximumWidth(300)
-splitter.setSizes([900, 260])
-```
-
-### 10.5 ROI 框选位置不准
-
-本系统内部保存的是原始视频帧坐标。只要 AC79 输出分辨率稳定，ROI 判断就稳定。
-
-如果改了 `open` 分辨率，例如从 `640x480` 改成其它分辨率，需要重新框选 ROI。
-
-### 10.6 会议室模式不显示阈值
-
-这是预期行为。
-
-会议室模式不使用单个 ROI 的 `dwell_sec`，而是统一使用：
-
-```bash
-MEETING_USE_START_SEC
-MEETING_RELEASE_EMPTY_SEC
-MEETING_LONG_USE_SEC
-MEETING_ABNORMAL_EXTRA_SEC
-MEETING_ABNORMAL_REPEAT_SEC
-```
-
-因此会议室模式下只显示 ROI 名称，不显示和不设置单个 ROI 阈值。
+- AC79 SD 卡中存在对应音频文件。
+- 手动发送 `sd:1` ~ `sd:6` 能播放音频。
+- CTP 进程仍在运行。
+- UI 日志中显示已经发送了 `sd:x` 命令。
 
 ---
 
-## 11. 推荐测试顺序
+## 17. 推荐测试顺序
 
-### 第一步：确认 AC79 UDP 视频流
+### 第一步：测试 AC79 UDP 视频流
 
 ```bash
 python3 jieli_min_udp_client.py --port 2224 --device-ip 192.168.1.1
 ```
 
-如果这个脚本也没有画面，问题通常在 AC79 发流或网络链路，不在 UI。
+如果这一步没有图像，问题通常在 AC79 推流或网络链路，不在 UI。
 
-### 第二步：确认 RKNN 推理脚本
-
-```bash
-python3 jieli_rknn_udp_infer.py --model ./model/person.rknn --labels ./model/labels.txt
-```
-
-确认能正常加载模型并进行检测。
-
-### 第三步：关闭其它 UDP 监听程序
+### 第二步：准备 TensorRT 模型
 
 ```bash
-pkill -f jieli_rknn_udp_infer.py
-pkill -f jieli_min_udp_client.py
-pkill -f run_roi_ui.py
+./scripts/prepare_yolo_trt.sh \
+  --pt /home/ubuntu/Desktop/yolo/yolo11n.pt \
+  --engine ./model/yolo11n.engine \
+  --imgsz 640
 ```
 
-### 第四步：启动 UI
+### 第三步：启动 Nano UI
 
 ```bash
-export DISPLAY=:0
-python3 run_roi_ui.py --device-ip 192.168.1.1
+./start_roi_ui_nano.sh --model ./model/yolo11n.engine --class-filter 0
 ```
 
-点击 **启动**。
-
-### 第五步：测试默认模式
+### 第四步：测试普通 ROI 模式
 
 ```text
-默认模式
+Default Mode
 ↓
-进入编辑
+Enter ROI Edit
 ↓
-画 ROI
+Draw ROI
 ↓
-选择音频
+Select audio
 ↓
-设置阈值
+Set dwell threshold
 ↓
-应用 ROI
+Apply ROI
 ↓
-保存组
+Save Group
 ↓
-人员进入 ROI
+Person enters ROI
 ↓
-超过阈值后播放对应音频
+Reach threshold and trigger alarm audio
 ```
 
-### 第六步：测试会议室模式
+### 第五步：测试会议室模式
 
-测试时可以把 `.env` 阈值改短：
+为了快速测试，可以临时缩短阈值：
 
-```bash
+```env
 MEETING_USE_START_SEC=5
 MEETING_RELEASE_EMPTY_SEC=5
 MEETING_LONG_USE_SEC=10
@@ -743,69 +728,109 @@ MEETING_RELEASE_AUDIO_GAP_SEC=3
 测试流程：
 
 ```text
-选择会议室模式
+选择 Meeting Mode
 ↓
 设置工作时间
 ↓
-画多个 ROI
+绘制一个或多个 ROI
 ↓
 人员进入 ROI
 ↓
-5 秒后会议室开始使用
+5 秒后：会议室开始使用
 ↓
-10 秒后长时间占用
+10 秒后：长时间占用提醒
 ↓
-再 10 秒后异常占用
+再过 10 秒：异常占用提醒
 ↓
-继续占用每 10 秒重复播放 sd:6
+持续占用时 sd:6 重复播放
 ↓
-人员离开 ROI 5 秒后释放会议室
+人员离开 ROI 5 秒后：会议室释放
 ```
 
 ---
 
-## 12. 主要文件说明
+## 18. 主要文件说明
+
+### `start_roi_ui_nano.sh`
+
+Nano 专用启动脚本。负责准备 Python 运行环境、加载 `.env.nano`、设置 TensorRT 后端，并启动 `run_roi_ui.py`。
+
+### `.env.nano`
+
+Nano 专用环境配置文件。包含 `DETECTOR_BACKEND=tensorrt`、TensorRT 模型路径、标签路径、输入尺寸、类别过滤、UDP 端口、设备 IP、ROI 输出路径等配置。
 
 ### `run_roi_ui.py`
 
-UI 启动入口。负责解析命令行参数、读取 `.env`、创建 `AppConfig`、启动 `MainWindow`。
+UI 入口文件。读取配置、初始化主窗口并启动 ROI UI 应用。
 
 ### `roi_ui/config.py`
 
-读取环境变量，管理 UDP、模型路径、ROI 输出、会议室模式阈值和 watchdog 参数。
+读取环境变量，并管理 UDP、模型路径、ROI 输出、会议室阈值和看门狗参数。
 
 ### `roi_ui/worker.py`
 
-负责 UDP 收流、JPEG 分片重组、JPEG 解码、调用 RKNN 推理，并把原图和检测结果发送给 UI。
+负责 UDP 接收、JPEG 重组、JPEG 解码、调用检测后端，并将画面和检测结果发送给 UI。
 
 ### `roi_ui/video_widget.py`
 
-负责视频显示、人物检测框绘制、ROI 绘制、会议室状态文字绘制、鼠标拖拽创建 ROI，以及 UI 坐标和原始帧坐标之间的映射。
+负责视频显示、检测框绘制、ROI 绘制、会议室状态文字显示、鼠标拖拽和坐标映射。
 
 ### `roi_ui/dwell.py`
 
-负责根据人体检测框底边中点判断是否进入 ROI，并统计驻留时间。
+负责底边中点计算、ROI 命中判断和驻留时间统计。
 
 ### `roi_ui/roi_model.py`
 
-负责 ROI 数据结构、ROI 组保存和加载。
+负责 ROI 数据结构、ROI 分组保存和加载。
 
-### `roi_ui/main_window.py`
+### `jieli_min_ctp_client.py`
 
-负责主界面、按钮、模式切换、ROI 编辑、默认模式报警、会议室模式状态机、音频播报、事件日志和 CTP 控制。
+用于向 AC79 发送 CTP 命令，例如视频流控制和本地音频播放命令。
+
+### `jieli_min_udp_client.py`
+
+用于单独测试 UDP JPEG 视频流。调试视频问题时建议先运行它。
 
 ---
 
-## 13. 版本注意事项
+## 19. 与旧 RK3588 版本的区别
 
-1. UI 运行时不要同时运行旧的 `jieli_rknn_udp_infer.py`，否则可能抢占 UDP `2224`。
-2. 启动 UI 前确认 RK3588 已连接 AC79 网络。
-3. `open` 命令最后一个参数建议使用 `0`，保持 UDP JPEG 格式。
-4. 会议室模式下不设置单个 ROI 阈值，统一使用会议室全局阈值。
-5. 非工作时间开始的会议室占用，释放时只播放 `sd:4`，不播放 `sd:2`。
-6. 工作时间开始的会议室占用，释放时播放 `sd:2`，再延迟播放 `sd:4`。
-7. 如果视频流偶发卡住，建议启用 watchdog 参数自动重开发流。
-8. 如果 LCD 分辨率较小，建议限制右侧控制区宽度或设置 `QT_SCALE_FACTOR`。
-9. 如果 AC79 IP 变化，需要同步修改 `.env` 中的 `DEVICE_IP`。
-10. 如果更换模型输入尺寸或视频分辨率，建议重新验证 ROI 坐标和检测效果。
+旧版 README 主要描述：
 
+```text
+RK3588 + RKNNLite + person.rknn
+```
+
+当前 Nano 版本应描述为：
+
+```text
+Jetson Nano / Orin Nano + TensorRT + yolo11n.engine
+```
+
+主要变化：
+
+| 旧 RK 版本 | 当前 Nano 版本 |
+|---|---|
+| RK3588 | Jetson Nano / Orin Nano |
+| RKNNLite / RKNN | TensorRT |
+| `person.rknn` | `yolo11n.engine` 或自定义 `.engine` |
+| `BGR_INPUT=1` | 通常使用 `BGR_INPUT=0` |
+| `start_roi_ui_all.sh` | 优先使用 `start_roi_ui_nano.sh` |
+| `.env.roi.example` / `.env` | 优先使用 `.env.nano` |
+
+---
+
+## 20. 后续可优化方向
+
+后续可以继续扩展：
+
+1. 加入 ByteTrack / BoT-SORT，实现稳定多目标 ID 跟踪。
+2. 增加多边形 ROI 支持。
+3. 增加 ROI 拖动、缩放、删除手柄。
+4. 增加 Web 配置页面。
+5. 增加事件回放和截图查看页面。
+6. 增加 TensorRT engine 兼容性检查。
+7. 增加 systemd 服务，实现 Jetson 开机自启。
+8. 增加 MQTT / HTTP 事件上传。
+9. 使用轻量数据库保存事件历史。
+10. 增加工作日、周末、白天、夜间等多时段规则。
