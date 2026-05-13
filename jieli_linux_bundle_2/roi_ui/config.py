@@ -29,6 +29,14 @@ def _get_bool(name: str, default: str = "0") -> bool:
     return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _get_int_tuple(name: str, default: str = "") -> tuple[int, ...]:
+    value = os.getenv(name, default).strip()
+    if not value or value.lower() in {"all", "none", "off"}:
+        return ()
+    parts = value.replace(",", " ").split()
+    return tuple(int(part) for part in parts)
+
+
 @dataclass
 class AppConfig:
     bind_ip: str = os.getenv("BIND_IP", "0.0.0.0")
@@ -36,6 +44,8 @@ class AppConfig:
     # 为空字符串表示不过滤设备 IP；默认 AC79 AP 常见地址为 192.168.1.1
     device_ip: str = os.getenv("DEVICE_IP", "192.168.1.1")
     cleanup_timeout: float = float(os.getenv("CLEANUP_TIMEOUT", "3.0"))
+
+    detector_backend: str = os.getenv("DETECTOR_BACKEND", "rknn").strip().lower()
 
     # 与原 jieli_rknn_udp_infer.py 保持一致：默认使用 jieli_linux_bundle/model
     model_path: str = os.getenv("MODEL_PATH", "./model/person.rknn")
@@ -48,6 +58,7 @@ class AppConfig:
     single_core: bool = _get_bool("SINGLE_CORE", "1")
     max_det: int = int(os.getenv("MAX_DET", "10"))
     agnostic_nms: bool = _get_bool("AGNOSTIC_NMS", "0")
+    class_filter: tuple[int, ...] = _get_int_tuple("CLASS_FILTER", "")
 
     # ROI 与报警输出
     screenshot_dir: str = os.getenv("SCREENSHOT_DIR", "./roi_ui_output/screenshots")

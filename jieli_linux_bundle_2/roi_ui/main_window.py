@@ -128,7 +128,8 @@ class MainWindow(QMainWindow):
         self.video_watchdog_timer.timeout.connect(self._check_video_watchdog)
 
 
-        self.setWindowTitle('AC79 ROI UI - UDP + RKNN')
+        self.backend_label = self.config.detector_backend.upper()
+        self.setWindowTitle(f'AC79 ROI UI - UDP + {self.backend_label}')
         screen = QApplication.primaryScreen()
         if screen:
             g = screen.availableGeometry()
@@ -343,7 +344,7 @@ class MainWindow(QMainWindow):
         self.worker.start()
 
         self.label_status.setText('状态：运行中')
-        self.log('UDP/RKNN 工作线程启动中...')
+        self.log(f'UDP/{self.backend_label} 工作线程启动中...')
 
         self.last_frame_ts = time.time()
         self.last_stream_reopen_ts = 0.0
@@ -417,7 +418,7 @@ class MainWindow(QMainWindow):
 
     def _restart_ctp_process(self) -> None:
         """
-        只重启 CTP 客户端，不动 UDP/RKNN worker。
+        只重启 CTP 客户端，不动 UDP/推理 worker。
         """
         if self.ctp_proc and self.ctp_proc.poll() is None:
             try:
@@ -436,10 +437,10 @@ class MainWindow(QMainWindow):
 
     def _restart_udp_worker_only(self) -> None:
         """
-        只重启 UDP/RKNN worker。
+        只重启 UDP/推理 worker。
         不调用 stop_worker()，因为 stop_worker() 会停止 watchdog 和 CTP。
         """
-        self.log('视频流 watchdog：开始重启 UDP/RKNN worker')
+        self.log(f'视频流 watchdog：开始重启 UDP/{self.backend_label} worker')
 
         if self.worker:
             try:
@@ -456,7 +457,7 @@ class MainWindow(QMainWindow):
         self.worker.start()
 
         self.last_frame_ts = time.time()
-        self.log('视频流 watchdog：UDP/RKNN worker 已重启')
+        self.log(f'视频流 watchdog：UDP/{self.backend_label} worker 已重启')
 
         QTimer.singleShot(1000, self._reopen_video_stream)
 
@@ -491,10 +492,10 @@ class MainWindow(QMainWindow):
             self.log(f'视频流 watchdog：{stale_sec:.1f}s 未收到新帧，尝试重开发流')
             self._reopen_video_stream()
 
-        # 第二阶段：仍然没恢复，则重启 UDP/RKNN worker
+        # 第二阶段：仍然没恢复，则重启 UDP/推理 worker
         if stale_sec >= full_restart_sec and now - self.last_worker_restart_ts >= full_restart_sec:
             self.last_worker_restart_ts = now
-            self.log(f'视频流 watchdog：{stale_sec:.1f}s 未恢复，重启 UDP/RKNN worker')
+            self.log(f'视频流 watchdog：{stale_sec:.1f}s 未恢复，重启 UDP/{self.backend_label} worker')
             self._restart_udp_worker_only()
 
     def stop_worker(self) -> None:

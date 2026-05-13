@@ -14,6 +14,7 @@ import numpy as np
 from PySide6.QtCore import QThread, Signal
 
 from .config import AppConfig
+from . import udp_protocol
 
 
 class UdpInferWorker(QThread):
@@ -72,6 +73,28 @@ class UdpInferWorker(QThread):
         raise FileNotFoundError('未找到 jieli_rknn_udp_infer.py，请将本 UI 放到 jieli_linux_bundle 旁边，或用 --helper-script 指定路径。')
 
     def _create_detector(self):
+        if self.config.detector_backend == 'tensorrt':
+            from .tensorrt_detector import YoloTensorRTDetector
+
+            self._helper = udp_protocol
+            detector = YoloTensorRTDetector(
+                model_path=self.config.model_path,
+                labels_path=self.config.labels_path,
+                input_size=(self.config.input_height, self.config.input_width),
+                obj_thresh=self.config.obj_thresh,
+                nms_thresh=self.config.nms_thresh,
+                max_det=self.config.max_det,
+                agnostic_nms=self.config.agnostic_nms,
+                use_rgb=not self.config.bgr_input,
+                class_filter=self.config.class_filter,
+                verbose=False,
+            )
+            self._log(f'[OK] 已加载 TensorRT 推理后端: {self.config.model_path}')
+            return self._helper, detector
+
+        if self.config.detector_backend != 'rknn':
+            raise ValueError(f'未知 DETECTOR_BACKEND: {self.config.detector_backend}')
+
         helper = self._load_helper()
         detector = helper.YoloRknnDetector(
             model_path=self.config.model_path,
@@ -85,6 +108,7 @@ class UdpInferWorker(QThread):
             use_all_cores=not self.config.single_core,
             verbose=False,
         )
+        self._log(f'[OK] 已加载 RKNN 推理后端: {self.config.model_path}')
         return helper, detector
 
     def _update_fps(self) -> float:

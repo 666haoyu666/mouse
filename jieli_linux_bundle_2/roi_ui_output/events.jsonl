@@ -53,3 +53,4 @@
 {"time": "2026-05-12T17:37:31", "event": "meeting_room_abnormal_use", "occupied_for_sec": 15.044, "threshold_sec": 15.0, "repeat_sec": 10.0, "started_in_work_time": false}
 {"time": "2026-05-12T17:37:41", "event": "meeting_room_abnormal_use", "occupied_for_sec": 25.09, "threshold_sec": 15.0, "repeat_sec": 10.0, "started_in_work_time": false}
 {"time": "2026-05-12T17:37:46", "event": "meeting_room_released", "occupied_for_sec": 30.45, "work_period": "09:00-17:00", "started_in_work_time": false, "was_abnormal": true}
+{"time": "2026-05-13T09:59:24", "event": "roi_dwell_alarm", "roi_id": 1, "roi_name": "roi_1", "dwell_time": 10.044, "threshold": 10.0, "det_count": 1, "audio_id": 1}
