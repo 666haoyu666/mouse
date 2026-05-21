@@ -33,6 +33,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 import cv2
 import numpy as np
 from rknnlite.api import RKNNLite
+from roi_ui.image_preprocess import FramePreprocessor
 
 PCM_TYPE_AUDIO = 0x01
 JPEG_TYPE_VIDEO = 0x02
@@ -383,6 +384,7 @@ class JieliRknnUdpInfer:
         display_size: Optional[Tuple[int, int]],
         detector: YoloRknnDetector,
         verbose: bool,
+        preprocessor: Optional[FramePreprocessor] = None,
     ) -> None:
         self.bind_ip = bind_ip
         self.bind_port = bind_port
@@ -393,6 +395,7 @@ class JieliRknnUdpInfer:
         self.display_size = display_size
         self.detector = detector
         self.verbose = verbose
+        self.preprocessor = preprocessor or FramePreprocessor.from_env()
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind((self.bind_ip, self.bind_port))
@@ -407,6 +410,7 @@ class JieliRknnUdpInfer:
         if self.device_ip:
             log(f"[INFO] 仅接收设备 IP: {self.device_ip}")
         log(f"[INFO] 显示窗口: {'开' if self.show_window else '关'}")
+        log(f"[INFO] YOLO 前帧处理: {self.preprocessor.summary()}")
 
     def close(self) -> None:
         try:
@@ -447,13 +451,15 @@ class JieliRknnUdpInfer:
         if frame_bgr is None:
             return False
 
+        infer_frame_bgr = self.preprocessor.apply(frame_bgr)
         try:
-            results = self.detector.infer(frame_bgr)
+            results = self.detector.infer(infer_frame_bgr)
         except Exception as e:
             log(f"[ERR] 推理失败: {e}")
             return False
 
-        vis = self.detector.draw(frame_bgr, results)
+        display_frame_bgr = infer_frame_bgr if self.preprocessor.config.display_processed else frame_bgr
+        vis = self.detector.draw(display_frame_bgr, results)
         fps = self.fps_counter.update()
 
         cv2.putText(vis, f"FPS: {fps:.1f}  DET: {len(results)}", (10, 30),
@@ -550,6 +556,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-window", action="store_true")
     p.add_argument("--fullscreen", action="store_true")
     p.add_argument("--display-size", nargs=2, type=int, default=None, metavar=("W", "H"))
+    p.add_argument("--no-frame-preprocess", action="store_true", help="关闭 YOLO 前 LAB/CLAHE/锐化帧处理")
+    p.add_argument("--frame-preprocess-display", action="store_true", help="窗口显示处理后的帧；默认只把处理后的帧送入 YOLO")
     p.add_argument("--verbose", action="store_true")
     return p
 
@@ -576,6 +584,11 @@ def main() -> int:
     )
 
     display_size = tuple(args.display_size) if args.display_size is not None else None
+    preprocessor = FramePreprocessor.from_env()
+    if args.no_frame_preprocess:
+        preprocessor.config.enabled = False
+    if args.frame_preprocess_display:
+        preprocessor.config.display_processed = True
 
     app = JieliRknnUdpInfer(
         bind_ip=args.bind_ip,
@@ -587,6 +600,7 @@ def main() -> int:
         display_size=display_size,
         detector=detector,
         verbose=args.verbose,
+        preprocessor=preprocessor,
     )
     return app.run()
 

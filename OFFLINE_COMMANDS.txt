@@ -1,0 +1,69 @@
+# AC79 Jetson TensorRT 仓鼠 UI 离线命令清单
+
+项目目录：
+
+cd /home/ubuntu/Desktop/AC791-RK3588_withUI_nano/jieli_linux_bundle_2
+
+
+一、正常启动流程
+
+1. 先手动连接开发板 WiFi。
+   WiFi 名一般是 camera 开头。
+   不要让脚本自动连接 WiFi，避免断开远程会话。
+
+2. 进入项目目录：
+
+cd /home/ubuntu/Desktop/AC791-RK3588_withUI_nano/jieli_linux_bundle_2
+
+3. 启动 UI：
+
+./start_roi_ui_nano.sh --class-filter 0
+
+4. UI 打开后，点击右侧“启动”。
+
+
+二、如果 UI 打开了但收不到画面
+
+先确认已经手动连接 camera 开头的 WiFi，然后试这个命令：
+
+cd /home/ubuntu/Desktop/AC791-RK3588_withUI_nano/jieli_linux_bundle_2
+./start_roi_ui_nano.sh --device-ip empty
+
+说明：
+--device-ip empty 只是不按来源 IP 过滤 UDP 包。
+CTP 开流仍会默认连接开发板 192.168.1.1。
+
+
+三、以后更换新的 pt 模型
+
+假设新模型是 /path/to/new_model.pt，执行：
+
+cd /home/ubuntu/Desktop/AC791-RK3588_withUI_nano/jieli_linux_bundle_2
+./scripts/prepare_yolo_trt.sh --pt /path/to/new_model.pt --engine ./model/new_model.engine --imgsz 640
+
+然后用新 engine 启动。单类别仓鼠模型通常保持 --class-filter 0：
+
+./start_roi_ui_nano.sh --model ./model/new_model.engine --class-filter 0
+
+
+四、重新生成当前 mouse.engine
+
+cd /home/ubuntu/Desktop/AC791-RK3588_withUI_nano/jieli_linux_bundle_2
+./scripts/prepare_yolo_trt.sh --pt /home/ubuntu/Desktop/mouse.pt --engine ./model/mouse.engine --imgsz 640
+
+
+五、查看本文件
+
+cat /home/ubuntu/Desktop/AC791-RK3588_withUI_nano/OFFLINE_COMMANDS.txt
+
+
+六、关键默认值
+
+开发板默认 IP：192.168.1.1
+UDP 监听端口：2224
+默认模型 engine：./model/mouse.engine
+默认标签文件：./model/hamster_labels.txt
+默认只检测仓鼠类别 0：CLASS_FILTER=0
+默认输入尺寸：640x640
+默认 ROI 文件：./roi_ui_output/hamster_rois.json
+默认事件日志：./roi_ui_output/hamster_events.jsonl

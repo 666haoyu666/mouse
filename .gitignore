@@ -1,0 +1,6 @@
+jieli_linux_bundle_2/.python_deps/
+jieli_linux_bundle_2/.ultralytics/
+jieli_linux_bundle_2/.venv_nano/
+jieli_linux_bundle_2/model/.export_work/
+__pycache__/
+*.pyc

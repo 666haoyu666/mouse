@@ -1,26 +1,21 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any
 import json
 import subprocess
 import sys
 import time
-from datetime import datetime
-from pathlib import Path
-from typing import List
 
-import cv2
-from PySide6.QtCore import QTime, QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication,
-    QComboBox,
-    QDialog,
-    QDialogButtonBox,
-    QFileDialog,
+    QCheckBox,
     QFormLayout,
     QGridLayout,
+    QGroupBox,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -28,350 +23,266 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QDoubleSpinBox,
+    QPlainTextEdit,
     QSplitter,
-    QTextEdit,
-    QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from .config import AppConfig
-from .dwell import DwellTracker
-from .roi_model import RectROI, load_roi_bundle, save_rois
-from .video_widget import VideoCanvas
+from .region_analyzer import analyze_detection
+from .roi_model import RectROI, default_scene_rois, load_rois, save_rois
+from .scene_stats import ActivityStats, BehaviorRuleEngine
+from .text_generator import generate_hotspot_text, generate_text
+from .tracker import IoUTracker
+from .video_widget import VideoWidget
 from .worker import UdpInferWorker
 
 
-@dataclass
-class MeetingRoomState:
-    in_use: bool = False
-    started_at: float | None = None
-    started_in_work_time: bool = True
-    last_presence_at: float | None = None
-    long_warned: bool = False
-
-    # 第一次异常占用是否已经播报过
-    abnormal_warned: bool = False
-    # 上一次播放 sd:6 的时间戳，用于周期性重复播报
-    last_abnormal_audio_at: float | None = None
-
-    def reset(self) -> None:
-        self.in_use = False
-        self.started_at = None
-        self.started_in_work_time = True
-        self.last_presence_at = None
-        self.long_warned = False
-        self.abnormal_warned = False
-        self.last_abnormal_audio_at = None
-
-class WorkPeriodDialog(QDialog):
-    def __init__(self, parent, start_text: str, end_text: str) -> None:
-        super().__init__(parent)
-        self.setWindowTitle('设置会议室工作时间')
-
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
-
-        self.edit_start = QTimeEdit()
-        self.edit_start.setDisplayFormat('HH:mm')
-        start_time = QTime.fromString(start_text, 'HH:mm')
-        self.edit_start.setTime(start_time if start_time.isValid() else QTime(9, 0))
-
-        self.edit_end = QTimeEdit()
-        self.edit_end.setDisplayFormat('HH:mm')
-        end_time = QTime.fromString(end_text, 'HH:mm')
-        self.edit_end.setTime(end_time if end_time.isValid() else QTime(18, 0))
-
-        form.addRow('开始时间', self.edit_start)
-        form.addRow('结束时间', self.edit_end)
-        layout.addLayout(form)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def get_period(self) -> tuple[str, str]:
-        return self.edit_start.time().toString('HH:mm'), self.edit_end.time().toString('HH:mm')
-
-
 class MainWindow(QMainWindow):
-    def __init__(self, config: AppConfig, helper_script: str | None = None) -> None:
+    def __init__(self, cfg: AppConfig, helper_script: str | None = None) -> None:
         super().__init__()
-        self.config = config
+        self.cfg = cfg
         self.helper_script = helper_script
         self.worker: UdpInferWorker | None = None
         self.ctp_proc: subprocess.Popen | None = None
-        self.rois: List[RectROI] = []
-        self.frame_size = None
-        self.last_frame = None
-        self.dwell_tracker = DwellTracker(absence_reset_sec=1.0)
-
-        self.mode = config.ui_mode if config.ui_mode in {'default', 'meeting'} else 'default'
-        self._changing_mode = False
-        self.work_start = config.meeting_default_work_start
-        self.work_end = config.meeting_default_work_end
-        self.meeting_state = MeetingRoomState()
-
-        self.release_audio_timer = QTimer(self)
-        self.release_audio_timer.setSingleShot(True)
-        self.release_audio_timer.timeout.connect(lambda: self._play_audio(4, '会议室无人，请关闭设备'))
-
-        # 视频流 watchdog：检测画面是否长时间没有更新
+        self.rois: list[RectROI] = []
+        self.last_frame_shape: tuple[int, int] | None = None
+        self.last_description = ""
+        self.backend_label = cfg.detector_backend.upper()
         self.last_frame_ts = 0.0
         self.last_stream_reopen_ts = 0.0
         self.last_worker_restart_ts = 0.0
+        self.tracker = IoUTracker(
+            iou_threshold=cfg.tracker_iou_threshold,
+            center_distance=cfg.tracker_center_distance,
+            max_missed=cfg.tracker_max_missed,
+            min_hits=cfg.tracker_min_hits,
+            trail_length=cfg.trail_length,
+            stationary_speed_threshold_px=cfg.stationary_speed_threshold_px,
+        )
+        self.stats = ActivityStats(cfg)
+        self.rules = BehaviorRuleEngine(cfg)
+        self._last_event_key_ts: dict[str, float] = {}
 
         self.video_watchdog_timer = QTimer(self)
         self.video_watchdog_timer.setInterval(1000)
         self.video_watchdog_timer.timeout.connect(self._check_video_watchdog)
 
-
-        self.setWindowTitle('AC79 ROI UI - UDP + RKNN')
+        self.setWindowTitle(f"{cfg.ui_title} - UDP + {self.backend_label}")
         screen = QApplication.primaryScreen()
         if screen:
             g = screen.availableGeometry()
-            self.resize(min(1280, int(g.width() * 0.95)), min(720, int(g.height() * 0.92)))
+            self.resize(min(1480, int(g.width() * 0.95)), min(880, int(g.height() * 0.92)))
         else:
-            self.resize(1280, 720)
-
+            self.resize(1480, 880)
         self._build_ui()
-        self._load_default_rois()
-        self._sync_mode_ui(initial=True)
+        self._load_rois_on_startup()
+        self._refresh_roi_list()
 
     def _build_ui(self) -> None:
-        central = QWidget()
+        central = QWidget(self)
         self.setCentralWidget(central)
         root = QHBoxLayout(central)
-        splitter = QSplitter()
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
         root.addWidget(splitter)
 
-        self.canvas = VideoCanvas()
-        self.canvas.roi_created.connect(self.on_roi_created)
-        splitter.addWidget(self.canvas)
+        self.video = VideoWidget(self)
+        self.video.set_grid_enabled(self.cfg.grid_enabled)
+        self.video.set_grid_labels_enabled(self.cfg.grid_labels_enabled)
+        self.video.set_heatmap_overlay_enabled(self.cfg.heatmap_overlay_enabled)
+        self.video.rois_changed.connect(self._on_rois_changed)
+        self.video.roi_selected.connect(self._on_roi_selected)
+        splitter.addWidget(self.video)
 
-        side = QWidget()
-        side.setMinimumWidth(220)
-        side.setMaximumWidth(300)
+        right = QWidget(self)
+        right.setMinimumWidth(460)
+        splitter.addWidget(right)
+        splitter.setSizes([980, 500])
+        panel = QVBoxLayout(right)
 
-        side_layout = QVBoxLayout(side)
-        side_layout.setContentsMargins(6, 6, 6, 6)
-        side_layout.setSpacing(4)
+        panel.addWidget(self._build_top_controls())
+        panel.addWidget(self._build_status_panel())
+        panel.addWidget(self._build_tracking_panel())
+        panel.addWidget(self._build_stats_panel())
+        panel.addWidget(self._build_roi_panel())
+        panel.addWidget(self._build_log_panel(), stretch=1)
 
-        splitter.addWidget(side)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 0)
-        splitter.setSizes([900, 260])
+    def _build_top_controls(self) -> QWidget:
+        box = QGroupBox("运行控制")
+        layout = QGridLayout(box)
+        self.btn_start = QPushButton("启动")
+        self.btn_stop = QPushButton("停止")
+        self.btn_stop.setEnabled(False)
+        self.chk_edit = QCheckBox("ROI 编辑模式")
+        self.chk_grid = QCheckBox("显示九宫格")
+        self.chk_grid.setChecked(self.cfg.grid_enabled)
+        self.chk_grid_labels = QCheckBox("显示宫格标签")
+        self.chk_grid_labels.setChecked(self.cfg.grid_labels_enabled)
+        self.chk_heatmap = QCheckBox("显示活动热区")
+        self.chk_heatmap.setChecked(self.cfg.heatmap_overlay_enabled)
 
-        top_buttons = QGridLayout()
-        self.btn_start = QPushButton('启动')
-        self.btn_stop = QPushButton('停止')
-        self.btn_edit = QPushButton('进入编辑')
-        self.btn_save = QPushButton('保存组')
-        self.btn_load = QPushButton('加载组')
-        self.btn_clear = QPushButton('清空')
-        top_buttons.setHorizontalSpacing(4)
-        top_buttons.setVerticalSpacing(4)
-        for i, btn in enumerate([self.btn_start, self.btn_stop, self.btn_edit, self.btn_save, self.btn_load, self.btn_clear]):
-            top_buttons.addWidget(btn, i // 2, i % 2)
-        side_layout.addLayout(top_buttons)
+        layout.addWidget(self.btn_start, 0, 0)
+        layout.addWidget(self.btn_stop, 0, 1)
+        layout.addWidget(self.chk_edit, 1, 0, 1, 2)
+        layout.addWidget(self.chk_grid, 2, 0)
+        layout.addWidget(self.chk_grid_labels, 2, 1)
+        layout.addWidget(self.chk_heatmap, 3, 0, 1, 2)
 
         self.btn_start.clicked.connect(self.start_worker)
         self.btn_stop.clicked.connect(self.stop_worker)
-        self.btn_edit.clicked.connect(self.toggle_edit)
-        self.btn_save.clicked.connect(self.save_rois_dialog)
-        self.btn_load.clicked.connect(self.load_rois_dialog)
-        self.btn_clear.clicked.connect(self.clear_rois)
+        self.chk_edit.toggled.connect(self.video.set_edit_mode)
+        self.chk_grid.toggled.connect(self.video.set_grid_enabled)
+        self.chk_grid_labels.toggled.connect(self.video.set_grid_labels_enabled)
+        self.chk_heatmap.toggled.connect(self.video.set_heatmap_overlay_enabled)
+        return box
 
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItem('默认模式', 'default')
-        self.mode_combo.addItem('会议室模式', 'meeting')
-        self.mode_combo.currentIndexChanged.connect(self.on_mode_changed)
-        side_layout.addWidget(QLabel('工作模式'))
-        side_layout.addWidget(self.mode_combo)
+    def _build_status_panel(self) -> QWidget:
+        box = QGroupBox("第一阶段结构化结果")
+        form = QFormLayout(box)
+        self.lbl_detected = QLabel("否")
+        self.lbl_count = QLabel("0")
+        self.lbl_bbox = QLabel("-")
+        self.lbl_center = QLabel("-")
+        self.lbl_grid = QLabel("-")
+        self.lbl_near = QLabel("-")
+        self.lbl_inside = QLabel("-")
+        self.lbl_fps = QLabel("0.0")
+        self.txt_desc = QPlainTextEdit()
+        self.txt_desc.setReadOnly(True)
+        self.txt_desc.setMaximumBlockCount(80)
+        self.txt_desc.setFixedHeight(82)
+        self.txt_desc.setPlaceholderText("中文描述会显示在这里")
 
-        self.work_time_label = QLabel('工作时间：—')
-        side_layout.addWidget(self.work_time_label)
+        form.addRow("是否检测到仓鼠", self.lbl_detected)
+        form.addRow("检测数量", self.lbl_count)
+        form.addRow("BBox", self.lbl_bbox)
+        form.addRow("中心点", self.lbl_center)
+        form.addRow("九宫格位置", self.lbl_grid)
+        form.addRow("靠近区域", self.lbl_near)
+        form.addRow("进入区域", self.lbl_inside)
+        form.addRow("FPS", self.lbl_fps)
+        form.addRow("中文描述", self.txt_desc)
+        return box
+
+    def _build_tracking_panel(self) -> QWidget:
+        box = QGroupBox("第二阶段：多帧跟踪与停留时间")
+        form = QFormLayout(box)
+        self.lbl_active_ids = QLabel("-")
+        self.lbl_main_track = QLabel("-")
+        self.lbl_track_age = QLabel("0.0 s")
+        self.lbl_roi_dwell = QLabel("-")
+        self.lbl_grid_dwell = QLabel("-")
+        self.lbl_behaviors = QLabel("-")
+        self.lbl_behaviors.setWordWrap(True)
+        form.addRow("当前活动 ID", self.lbl_active_ids)
+        form.addRow("主目标", self.lbl_main_track)
+        form.addRow("连续跟踪时间", self.lbl_track_age)
+        form.addRow("当前 ROI 停留", self.lbl_roi_dwell)
+        form.addRow("当前宫格停留", self.lbl_grid_dwell)
+        form.addRow("规则判断", self.lbl_behaviors)
+        return box
+
+    def _build_stats_panel(self) -> QWidget:
+        box = QGroupBox("第二阶段：活动热区统计")
+        form = QFormLayout(box)
+        self.lbl_top_grids = QLabel("-")
+        self.lbl_top_rois = QLabel("-")
+        self.lbl_running = QLabel("0.0 s")
+        self.lbl_top_grids.setWordWrap(True)
+        self.lbl_top_rois.setWordWrap(True)
+        row = QHBoxLayout()
+        self.btn_reset_stats = QPushButton("重置统计")
+        self.btn_save_stats = QPushButton("保存统计")
+        row.addWidget(self.btn_reset_stats)
+        row.addWidget(self.btn_save_stats)
+        form.addRow("运行时长", self.lbl_running)
+        form.addRow("宫格热区", self.lbl_top_grids)
+        form.addRow("ROI 热区", self.lbl_top_rois)
+        form.addRow(row)
+        self.btn_reset_stats.clicked.connect(self._reset_stats)
+        self.btn_save_stats.clicked.connect(self._save_stats)
+        return box
+
+    def _build_roi_panel(self) -> QWidget:
+        box = QGroupBox("固定 ROI：木屋 / 跑轮 / 食盆 / 饮水器")
+        layout = QVBoxLayout(box)
+        row1 = QHBoxLayout()
+        self.btn_seed = QPushButton("生成默认 ROI")
+        self.btn_save = QPushButton("保存 ROI")
+        row1.addWidget(self.btn_seed)
+        row1.addWidget(self.btn_save)
+        layout.addLayout(row1)
+        row2 = QHBoxLayout()
+        self.btn_load = QPushButton("加载 ROI")
+        self.btn_clear = QPushButton("清空 ROI")
+        row2.addWidget(self.btn_load)
+        row2.addWidget(self.btn_clear)
+        layout.addLayout(row2)
 
         self.roi_list = QListWidget()
-        side_layout.addWidget(QLabel('ROI 列表'))
-        side_layout.addWidget(self.roi_list)
-        self.roi_list.currentRowChanged.connect(self.on_roi_selected)
+        self.roi_list.setMaximumHeight(120)
+        self.roi_name = QLineEdit()
+        self.btn_apply_name = QPushButton("修改名称")
+        self.btn_delete_roi = QPushButton("删除选中 ROI")
+        layout.addWidget(self.roi_list)
+        layout.addWidget(QLabel("名称"))
+        layout.addWidget(self.roi_name)
+        row3 = QHBoxLayout()
+        row3.addWidget(self.btn_apply_name)
+        row3.addWidget(self.btn_delete_roi)
+        layout.addLayout(row3)
 
-        form = QFormLayout()
-        self.edit_name = QLineEdit()
+        self.btn_seed.clicked.connect(self._seed_default_rois)
+        self.btn_save.clicked.connect(self._save_rois)
+        self.btn_load.clicked.connect(self._load_rois_manually)
+        self.btn_clear.clicked.connect(self._clear_rois)
+        self.roi_list.currentItemChanged.connect(self._on_roi_item_changed)
+        self.btn_apply_name.clicked.connect(self._apply_roi_name)
+        self.btn_delete_roi.clicked.connect(self._delete_selected_roi)
+        return box
 
-        self.label_dwell = QLabel('驻留阈值(秒)')
-        self.spin_dwell = QDoubleSpinBox()
-        self.spin_dwell.setRange(0.5, 3600)
-        self.spin_dwell.setDecimals(1)
-        self.spin_dwell.setValue(10.0)
+    def _build_log_panel(self) -> QWidget:
+        box = QGroupBox("运行日志 / 行为事件")
+        layout = QVBoxLayout(box)
+        self.log_edit = QPlainTextEdit()
+        self.log_edit.setReadOnly(True)
+        self.log_edit.setMaximumBlockCount(600)
+        layout.addWidget(self.log_edit)
+        return box
 
-        self.label_audio = QLabel('报警音频')
-        self.combo_audio = QComboBox()
-        for i in range(1, 7):
-            self.combo_audio.addItem(f'音频 {i} (sd:{i})', i)
-
-        form.addRow('名称', self.edit_name)
-        form.addRow(self.label_dwell, self.spin_dwell)
-        form.addRow(self.label_audio, self.combo_audio)
-        side_layout.addLayout(form)
-
-        row2 = QHBoxLayout()
-        self.btn_apply = QPushButton('应用ROI')
-        self.btn_delete = QPushButton('删除ROI')
-        row2.addWidget(self.btn_apply)
-        row2.addWidget(self.btn_delete)
-        row2.setSpacing(4)
-        side_layout.addLayout(row2)
-        self.btn_apply.clicked.connect(self.apply_roi_edit)
-        self.btn_delete.clicked.connect(self.delete_selected_roi)
-
-        self.label_status = QLabel('状态：未启动')
-        side_layout.addWidget(self.label_status)
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        side_layout.addWidget(self.log_text)
-
-    def log(self, msg: str) -> None:
-        stamp = datetime.now().strftime('%H:%M:%S')
-        self.log_text.append(f'[{stamp}] {msg}')
+    def append_log(self, text: str) -> None:
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.log_edit.appendPlainText(f"[{ts}] {text}")
 
     def _send_ctp_line(self, line: str) -> bool:
         try:
             if self.ctp_proc and self.ctp_proc.poll() is None and self.ctp_proc.stdin:
-                self.ctp_proc.stdin.write(line if line.endswith('\n') else line + '\n')
+                self.ctp_proc.stdin.write(line if line.endswith("\n") else line + "\n")
                 self.ctp_proc.stdin.flush()
                 return True
-        except Exception as e:
-            self.log(f'发送 CTP 命令失败: {e}')
+        except Exception as exc:
+            self.append_log(f"发送 CTP 命令失败: {exc}")
         return False
-
-    def _play_audio(self, audio_id: int, reason: str) -> None:
-        ok = self._send_ctp_line(f'sd:{audio_id}')
-        if ok:
-            self.log(f'已发送杰理音频命令: sd:{audio_id} | {reason}')
-        else:
-            self.log(f'CTP 未连接，无法发送 sd:{audio_id} | {reason}')
-
-    def _apply_canvas_room_overlay(self) -> None:
-        if self.mode != 'meeting':
-            self.canvas.set_room_overlay(False, '', (0, 255, 0))
-            return
-        font_size = self.btn_start.font().pointSize() or 12
-        if self.meeting_state.in_use:
-            self.canvas.set_room_overlay(True, self.config.meeting_busy_text, (255, 0, 0), font_size=font_size)
-        else:
-            self.canvas.set_room_overlay(True, self.config.meeting_idle_text, (0, 255, 0), font_size=font_size)
-
-    def _sync_mode_ui(self, initial: bool = False) -> None:
-        self._changing_mode = True
-        self.mode_combo.setCurrentIndex(1 if self.mode == 'meeting' else 0)
-        self._changing_mode = False
-
-        is_default = self.mode == 'default'
-        is_meeting = self.mode == 'meeting'
-
-        # 默认模式：可设置 ROI 阈值和音频
-        # 会议室模式：不显示、不允许设置 ROI 阈值，也不选择音频
-        self.label_dwell.setVisible(is_default)
-        self.spin_dwell.setVisible(is_default)
-        self.label_audio.setVisible(is_default)
-        self.combo_audio.setVisible(is_default)
-
-        self.work_time_label.setVisible(is_meeting)
-        self.work_time_label.setText(f'工作时间：{self.work_start} - {self.work_end}' if self.mode == 'meeting' else '工作时间：—')
-        self.canvas.set_show_roi_threshold(is_default)
-        self.refresh_roi_list()
-        self._apply_canvas_room_overlay()
-
-    def on_mode_changed(self, index: int) -> None:
-        if self._changing_mode:
-            return
-        new_mode = self.mode_combo.currentData()
-        if new_mode == self.mode:
-            return
-        if new_mode == 'meeting':
-            dialog = WorkPeriodDialog(self, self.work_start, self.work_end)
-            if dialog.exec() != int(QDialog.DialogCode.Accepted):
-                self._changing_mode = True
-                self.mode_combo.setCurrentIndex(0 if self.mode == 'default' else 1)
-                self._changing_mode = False
-                return
-            self.work_start, self.work_end = dialog.get_period()
-            self.meeting_state.reset()
-        else:
-            self.release_audio_timer.stop()
-            self.meeting_state.reset()
-        self.mode = new_mode
-        self._sync_mode_ui()
-
-    def _load_default_rois(self) -> None:
-        bundle = load_roi_bundle(self.config.roi_json_path)
-        self.rois = bundle.get('rois', [])
-        self.refresh_roi_list()
-        self.canvas.set_rois(self.rois)
-        if self.rois:
-            self.log(f'已加载默认 ROI 组: {self.config.roi_json_path}')
-
-    def refresh_roi_list(self) -> None:
-        self.roi_list.clear()
-
-        for roi in self.rois:
-            if self.mode == 'meeting':
-                text = f'#{roi.roi_id} {roi.name}'
-            else:
-                text = (
-                    f'#{roi.roi_id} {roi.name} | '
-                    f'阈值 {roi.dwell_sec:.1f}s | '
-                    f'音频 sd:{getattr(roi, "audio_id", 1)}'
-                )
-
-            item = QListWidgetItem(text)
-            self.roi_list.addItem(item)
-
-    def start_worker(self) -> None:
-        if self.worker and self.worker.isRunning():
-            self.log('工作线程已在运行')
-            return
-
-        self.worker = UdpInferWorker(self.config, helper_script=self.helper_script)
-        self.worker.frame_ready.connect(self.on_frame_ready)
-        self.worker.log_message.connect(self.log)
-        self.worker.error_message.connect(self.on_worker_error)
-        self.worker.start()
-
-        self.label_status.setText('状态：运行中')
-        self.log('UDP/RKNN 工作线程启动中...')
-
-        self.last_frame_ts = time.time()
-        self.last_stream_reopen_ts = 0.0
-        self.last_worker_restart_ts = 0.0
-
-        if not self.video_watchdog_timer.isActive():
-            self.video_watchdog_timer.start()
-
-        QTimer.singleShot(1500, self.start_ctp_stream)
 
     def start_ctp_stream(self) -> None:
         if self.ctp_proc and self.ctp_proc.poll() is None:
-            self.log('CTP 已在运行，不重复启动')
+            self.append_log("CTP 已在运行，不重复启动")
             return
 
-        ctp_script = Path(__file__).resolve().parent.parent / 'jieli_min_ctp_client.py'
+        ctp_script = Path(__file__).resolve().parent.parent / "jieli_min_ctp_client.py"
         if not ctp_script.exists():
-            self.log(f'CTP 脚本不存在: {ctp_script}')
+            self.append_log(f"CTP 脚本不存在: {ctp_script}")
             return
 
-        host = self.config.device_ip.strip() or '192.168.1.1'
+        host = self.cfg.device_ip.strip() or "192.168.1.1"
         try:
-            log_path = Path('./roi_ui_output/ctp_auto.log')
+            log_path = Path("./roi_ui_output/ctp_auto.log")
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            log_file = log_path.open('a', encoding='utf-8')
-
+            log_file = log_path.open("a", encoding="utf-8")
             self.ctp_proc = subprocess.Popen(
-                [sys.executable, str(ctp_script), '--host', host],
+                [sys.executable, str(ctp_script), "--host", host],
                 stdin=subprocess.PIPE,
                 stdout=log_file,
                 stderr=log_file,
@@ -379,488 +290,403 @@ class MainWindow(QMainWindow):
                 bufsize=1,
             )
 
-            for cmd in ['app\n', 'date\n', 'open 640 480 20 8000 0\n']:
+            for cmd in ["app", "date", "open 640 480 20 8000 0"]:
                 if self.ctp_proc.stdin:
-                    self.ctp_proc.stdin.write(cmd)
+                    self.ctp_proc.stdin.write(cmd + "\n")
                     self.ctp_proc.stdin.flush()
                     time.sleep(0.3)
 
-            self.log(f'已自动发送 CTP 开流命令: host={host}, open 640x480 fps=20 format=0')
-            self.log(f'CTP 日志: {log_path}')
-        except Exception as e:
-            self.log(f'自动启动 CTP 失败: {e}')
+            self.append_log(f"已自动发送 CTP 开流命令: host={host}, open 640x480 fps=20 format=0")
+            self.append_log(f"CTP 日志: {log_path}")
+        except Exception as exc:
+            self.append_log(f"自动启动 CTP 失败: {exc}")
+
+    def _stop_ctp_stream(self) -> None:
+        if not self.ctp_proc or self.ctp_proc.poll() is not None:
+            self.ctp_proc = None
+            return
+        try:
+            self._send_ctp_line("quit")
+            self.ctp_proc.terminate()
+            self.ctp_proc.wait(timeout=2)
+        except Exception:
+            try:
+                self.ctp_proc.kill()
+            except Exception:
+                pass
+        self.ctp_proc = None
+        self.append_log("CTP 已停止")
 
     def _reopen_video_stream(self) -> None:
-        """
-        不重启 UI，只重新给 AC79 发送开流命令。
-        用于处理 UDP 断流、AC79 停止发帧、CTP 开流状态丢失等情况。
-        """
         if self.ctp_proc and self.ctp_proc.poll() is None:
             ok = True
-
-            for line in [
-                'app',
-                'date',
-                'open 640 480 20 8000 0',
-            ]:
+            for line in ["app", "date", "open 640 480 20 8000 0"]:
                 if not self._send_ctp_line(line):
                     ok = False
                     break
-
             if ok:
-                self.log('视频流 watchdog：已重新发送 CTP 开流命令')
+                self.append_log("视频流 watchdog：已重新发送 CTP 开流命令")
                 return
 
-        self.log('视频流 watchdog：CTP 不可用，尝试重新启动 CTP')
+        self.append_log("视频流 watchdog：CTP 不可用，尝试重新启动 CTP")
         self._restart_ctp_process()
 
-
     def _restart_ctp_process(self) -> None:
-        """
-        只重启 CTP 客户端，不动 UDP/RKNN worker。
-        """
-        if self.ctp_proc and self.ctp_proc.poll() is None:
-            try:
-                self._send_ctp_line('quit')
-                self.ctp_proc.terminate()
-                self.ctp_proc.wait(timeout=2)
-            except Exception:
-                try:
-                    self.ctp_proc.kill()
-                except Exception:
-                    pass
-
-        self.ctp_proc = None
+        self._stop_ctp_stream()
         self.start_ctp_stream()
 
-
     def _restart_udp_worker_only(self) -> None:
-        """
-        只重启 UDP/RKNN worker。
-        不调用 stop_worker()，因为 stop_worker() 会停止 watchdog 和 CTP。
-        """
-        self.log('视频流 watchdog：开始重启 UDP/RKNN worker')
-
+        self.append_log(f"视频流 watchdog：开始重启 UDP/{self.backend_label} worker")
         if self.worker:
+            try:
+                self.worker.finished.disconnect(self._on_worker_finished)
+            except Exception:
+                pass
             try:
                 self.worker.stop()
                 self.worker.wait(2000)
-            except Exception as e:
-                self.log(f'停止旧 worker 失败: {e}')
+            except Exception as exc:
+                self.append_log(f"停止旧 worker 失败: {exc}")
             self.worker = None
 
-        self.worker = UdpInferWorker(self.config, helper_script=self.helper_script)
-        self.worker.frame_ready.connect(self.on_frame_ready)
-        self.worker.log_message.connect(self.log)
-        self.worker.error_message.connect(self.on_worker_error)
+        self.worker = UdpInferWorker(config=self.cfg, helper_script=self.helper_script)
+        self.worker.frame_ready.connect(self._on_frame_ready)
+        self.worker.log_message.connect(self.append_log)
+        self.worker.error_message.connect(self._on_worker_error)
+        self.worker.finished.connect(self._on_worker_finished)
         self.worker.start()
-
         self.last_frame_ts = time.time()
-        self.log('视频流 watchdog：UDP/RKNN worker 已重启')
-
+        self.append_log(f"视频流 watchdog：UDP/{self.backend_label} worker 已重启")
         QTimer.singleShot(1000, self._reopen_video_stream)
 
-
     def _check_video_watchdog(self) -> None:
-        """
-        每秒检查一次画面是否长时间没有更新。
-        如果卡住，先重发 CTP open；如果仍不恢复，再重启 UDP worker。
-        """
         if not self.worker or not self.worker.isRunning():
             return
 
         now = time.time()
-
         if self.last_frame_ts <= 0:
             self.last_frame_ts = now
             return
 
         stale_sec = now - self.last_frame_ts
-        stall_timeout = float(getattr(self.config, "video_stall_timeout_sec", 5.0))
-        reopen_cooldown = float(getattr(self.config, "video_reopen_cooldown_sec", 8.0))
-        full_restart_sec = float(getattr(self.config, "video_full_restart_sec", 20.0))
-
+        stall_timeout = float(getattr(self.cfg, "video_stall_timeout_sec", 5.0))
+        reopen_cooldown = float(getattr(self.cfg, "video_reopen_cooldown_sec", 8.0))
+        full_restart_sec = float(getattr(self.cfg, "video_full_restart_sec", 20.0))
         if stale_sec < stall_timeout:
             return
 
-        self.label_status.setText(f'状态：视频流恢复中 | 已卡住 {stale_sec:.1f}s')
-
-        # 第一阶段：重发 CTP open
         if now - self.last_stream_reopen_ts >= reopen_cooldown:
             self.last_stream_reopen_ts = now
-            self.log(f'视频流 watchdog：{stale_sec:.1f}s 未收到新帧，尝试重开发流')
+            self.append_log(f"视频流 watchdog：{stale_sec:.1f}s 未收到新帧，尝试重开发流")
             self._reopen_video_stream()
 
-        # 第二阶段：仍然没恢复，则重启 UDP/RKNN worker
         if stale_sec >= full_restart_sec and now - self.last_worker_restart_ts >= full_restart_sec:
             self.last_worker_restart_ts = now
-            self.log(f'视频流 watchdog：{stale_sec:.1f}s 未恢复，重启 UDP/RKNN worker')
+            self.append_log(f"视频流 watchdog：{stale_sec:.1f}s 未恢复，重启 UDP/{self.backend_label} worker")
             self._restart_udp_worker_only()
 
-    def stop_worker(self) -> None:
-        self.release_audio_timer.stop()
-        if hasattr(self, "video_watchdog_timer"):
-            self.video_watchdog_timer.stop()
-        if self.ctp_proc and self.ctp_proc.poll() is None:
-            try:
-                self._send_ctp_line('quit')
-                self.ctp_proc.terminate()
-                self.ctp_proc.wait(timeout=2)
-            except Exception:
-                try:
-                    self.ctp_proc.kill()
-                except Exception:
-                    pass
-            self.ctp_proc = None
-            self.log('CTP 已停止')
+    def _load_rois_on_startup(self) -> None:
+        self.rois = load_rois(self.cfg.roi_json_path)
+        self.video.set_rois(self.rois)
+        if self.rois:
+            self.append_log(f"已从 {self.cfg.roi_json_path} 读取 {len(self.rois)} 个 ROI")
 
+    def _load_rois_manually(self) -> None:
+        self._load_rois_on_startup()
+        self._refresh_roi_list()
+
+    def _save_rois(self) -> None:
+        save_rois(self.cfg.roi_json_path, self.rois)
+        self.append_log(f"ROI 已保存到 {self.cfg.roi_json_path}")
+
+    def _clear_rois(self) -> None:
+        self.rois = []
+        self.video.set_rois(self.rois)
+        self._refresh_roi_list()
+        self.append_log("已清空 ROI")
+
+    def _seed_default_rois(self) -> None:
+        if not self.last_frame_shape:
+            QMessageBox.information(self, "提示", "请先启动视频，拿到真实画面尺寸后再自动生成固定 ROI。")
+            return
+        frame_h, frame_w = self.last_frame_shape
+        self.rois = default_scene_rois(frame_w, frame_h)
+        self.video.set_rois(self.rois)
+        self._refresh_roi_list()
+        self.append_log("已按当前画面尺寸生成默认固定 ROI")
+
+    def _on_rois_changed(self, rois) -> None:
+        self.rois = [roi.normalized() for roi in rois]
+        self.video.set_rois(self.rois)
+        self._refresh_roi_list(select_id=self.video.selected_roi_id)
+
+    def _on_roi_selected(self, roi_id: int) -> None:
+        self.video.selected_roi_id = roi_id
+        self._refresh_roi_list(select_id=roi_id)
+
+    def _refresh_roi_list(self, select_id: int | None = None) -> None:
+        self.roi_list.blockSignals(True)
+        self.roi_list.clear()
+        for roi in self.rois:
+            item = QListWidgetItem(f"{roi.roi_id}: {roi.name}  ({roi.x1},{roi.y1})-({roi.x2},{roi.y2})")
+            item.setData(Qt.ItemDataRole.UserRole, roi.roi_id)
+            self.roi_list.addItem(item)
+            if select_id is not None and roi.roi_id == select_id:
+                self.roi_list.setCurrentItem(item)
+        self.roi_list.blockSignals(False)
+
+    def _on_roi_item_changed(self, current: QListWidgetItem | None, previous: QListWidgetItem | None) -> None:
+        if current is None:
+            self.roi_name.clear()
+            return
+        roi_id = int(current.data(Qt.ItemDataRole.UserRole))
+        self.video.selected_roi_id = roi_id
+        roi = next((item for item in self.rois if item.roi_id == roi_id), None)
+        self.roi_name.setText(roi.name if roi else "")
+        self.video.update()
+
+    def _apply_roi_name(self) -> None:
+        item = self.roi_list.currentItem()
+        if item is None:
+            return
+        roi_id = int(item.data(Qt.ItemDataRole.UserRole))
+        new_name = self.roi_name.text().strip()
+        if not new_name:
+            return
+        updated: list[RectROI] = []
+        for roi in self.rois:
+            if roi.roi_id == roi_id:
+                updated.append(
+                    RectROI(
+                        roi_id=roi.roi_id,
+                        name=new_name,
+                        x1=roi.x1,
+                        y1=roi.y1,
+                        x2=roi.x2,
+                        y2=roi.y2,
+                        enabled=roi.enabled,
+                        color=roi.color,
+                        dwell_sec=roi.dwell_sec,
+                        audio_id=roi.audio_id,
+                        alarm_enabled=roi.alarm_enabled,
+                    )
+                )
+            else:
+                updated.append(roi)
+        self.rois = updated
+        self.video.set_rois(self.rois)
+        self._refresh_roi_list(select_id=roi_id)
+
+    def _delete_selected_roi(self) -> None:
+        item = self.roi_list.currentItem()
+        if item is None:
+            return
+        roi_id = int(item.data(Qt.ItemDataRole.UserRole))
+        self.rois = [roi for roi in self.rois if roi.roi_id != roi_id]
+        self.video.selected_roi_id = None
+        self.video.set_rois(self.rois)
+        self._refresh_roi_list()
+
+    def start_worker(self) -> None:
+        if self.worker and self.worker.isRunning():
+            self.append_log("检测线程已在运行")
+            return
+        self.worker = UdpInferWorker(config=self.cfg, helper_script=self.helper_script)
+        self.worker.frame_ready.connect(self._on_frame_ready)
+        self.worker.log_message.connect(self.append_log)
+        self.worker.error_message.connect(self._on_worker_error)
+        self.worker.finished.connect(self._on_worker_finished)
+        self.worker.start()
+        self.btn_start.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+        self.last_frame_ts = time.time()
+        self.last_stream_reopen_ts = 0.0
+        self.last_worker_restart_ts = 0.0
+        if not self.video_watchdog_timer.isActive():
+            self.video_watchdog_timer.start()
+        self.append_log(f"第二阶段增强 UI 已启动：UDP/{self.backend_label} + 跟踪 + 停留统计 + 热区 + 行为规则")
+        QTimer.singleShot(1500, self.start_ctp_stream)
+
+    def stop_worker(self) -> None:
+        if self.video_watchdog_timer.isActive():
+            self.video_watchdog_timer.stop()
+        self._stop_ctp_stream()
         if self.worker:
             self.worker.stop()
-            self.worker.wait(2000)
+            self.worker.wait(2500)
             self.worker = None
+        self.btn_start.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+        self._save_stats()
+        self.append_log("已停止")
 
-        self.label_status.setText('状态：已停止')
-        self.log('已停止')
+    def _on_worker_finished(self) -> None:
+        self.worker = None
+        self.btn_start.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+        self.append_log("检测线程已停止")
 
-    def toggle_edit(self) -> None:
-        enabled = not self.canvas.edit_mode
-        self.canvas.set_edit_mode(enabled)
-        self.btn_edit.setText('退出 ROI 编辑' if enabled else '进入 ROI 编辑')
-        self.log('ROI 编辑模式已开启' if enabled else 'ROI 编辑模式已关闭')
+    def _on_worker_error(self, msg: str) -> None:
+        self.append_log("[ERROR] " + msg)
+        QMessageBox.critical(self, "工作线程错误", msg)
+        self.btn_start.setEnabled(True)
+        self.btn_stop.setEnabled(False)
 
-    def _next_roi_id(self) -> int:
-        return max([r.roi_id for r in self.rois], default=0) + 1
+    def _on_frame_ready(self, frame_bgr, detections: list[dict[str, Any]], fps: float) -> None:
+        self.last_frame_ts = time.time()
+        frame_h, frame_w = frame_bgr.shape[:2]
+        self.last_frame_shape = (frame_h, frame_w)
+        if not self.rois and self.cfg.auto_seed_default_rois:
+            self.rois = default_scene_rois(frame_w, frame_h)
+            self.video.set_rois(self.rois)
+            self._refresh_roi_list()
+            self.append_log("首次收到画面，已自动生成默认固定 ROI；请按真实笼子拖拽校准并保存。")
 
-    def on_roi_created(self, roi: RectROI) -> None:
-        roi.roi_id = self._next_roi_id()
-        roi.name = f'roi_{roi.roi_id}'
+        now = time.time()
+        primary_analysis = analyze_detection(
+            detections,
+            self.rois,
+            frame_w,
+            frame_h,
+            distance_threshold=self.cfg.roi_distance_threshold,
+            iou_threshold=self.cfg.roi_iou_threshold,
+            max_regions=self.cfg.max_description_regions,
+        )
 
-        if self.mode == 'default':
-            text, ok = QInputDialog.getItem(
-                self,
-                '选择 ROI 报警音频',
-                f'为 {roi.name} 选择报警音频：',
-                [str(i) for i in range(1, 7)],
-                0,
-                False,
-            )
-            if not ok:
-                self.log('已取消创建 ROI')
-                return
-            roi.audio_id = int(text)
-        else:
-            roi.audio_id = 1
-
-        self.rois.append(roi)
-        self.refresh_roi_list()
-        self.canvas.set_rois(self.rois)
-        self.log(f'新增 ROI: {roi.name} ({roi.x1},{roi.y1})-({roi.x2},{roi.y2})')
-
-    def on_roi_selected(self, row: int) -> None:
-        if row < 0 or row >= len(self.rois):
-            return
-
-        roi = self.rois[row]
-        self.edit_name.setText(roi.name)
-
-        if self.mode == 'default':
-            self.spin_dwell.setValue(float(roi.dwell_sec))
-
-            audio_id = int(getattr(roi, "audio_id", 1))
-            index = self.combo_audio.findData(audio_id)
-            if index >= 0:
-                self.combo_audio.setCurrentIndex(index)
-
-    def apply_roi_edit(self) -> None:
-        row = self.roi_list.currentRow()
-        if row < 0 or row >= len(self.rois):
-            QMessageBox.information(self, '提示', '请先选择一个 ROI')
-            return
-        roi = self.rois[row]
-        roi.name = self.edit_name.text().strip() or roi.name
-
-        if self.mode == 'default':
-            roi.dwell_sec = float(self.spin_dwell.value())
-            roi.audio_id = int(self.combo_audio.currentData() or 1)
-            self.log(f'已更新 ROI: {roi.name}, 阈值 {roi.dwell_sec:.1f}s, 音频 sd:{roi.audio_id}')
-        else:
-            self.log(f'已更新 ROI 名称: {roi.name}。会议室模式下不设置单个 ROI 阈值。')
-
-        self.refresh_roi_list()
-        self.canvas.set_rois(self.rois)
-        self.log(f'已更新 ROI: {roi.name}')
-
-    def _meeting_block_roi_delete(self) -> bool:
-        if self.mode == 'meeting' and self.meeting_state.in_use:
-            QMessageBox.information(self, '提示', '会议室正在使用中：已禁止删除/清空已有 ROI，但仍可继续新增 ROI。')
-            return True
-        return False
-
-    def delete_selected_roi(self) -> None:
-        if self._meeting_block_roi_delete():
-            return
-        row = self.roi_list.currentRow()
-        if row < 0 or row >= len(self.rois):
-            return
-        roi = self.rois.pop(row)
-        self.refresh_roi_list()
-        self.canvas.set_rois(self.rois)
-        self.log(f'已删除 ROI: {roi.name}')
-
-    def clear_rois(self) -> None:
-        if self._meeting_block_roi_delete():
-            return
-        self.rois.clear()
-        self.refresh_roi_list()
-        self.canvas.set_rois(self.rois)
-        self.log('已清空 ROI')
-
-    def save_rois_dialog(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, '保存 ROI 组', str(self.config.roi_json_path), 'JSON Files (*.json)')
-        if not path:
-            return
-        frame_size = self.frame_size if self.frame_size else None
-        extra_meta = {
-            'mode': self.mode,
-            'meeting_work_start': self.work_start if self.mode == 'meeting' else None,
-            'meeting_work_end': self.work_end if self.mode == 'meeting' else None,
-        }
-        save_rois(Path(path), self.rois, frame_size=frame_size, group_name=Path(path).stem, extra_meta=extra_meta)
-        self.log(f'ROI 组已保存到: {path}')
-
-    def load_rois_dialog(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, '加载 ROI 组', str(self.config.roi_json_path), 'JSON Files (*.json)')
-        if not path:
-            return
-        bundle = load_roi_bundle(Path(path))
-        self.rois = bundle.get('rois', [])
-        if self.mode == 'meeting':
-            self.work_start = bundle.get('meeting_work_start') or self.work_start
-            self.work_end = bundle.get('meeting_work_end') or self.work_end
-            self.work_time_label.setText(f'工作时间：{self.work_start} - {self.work_end}')
-        self.refresh_roi_list()
-        self.canvas.set_rois(self.rois)
-        self.log(f'ROI 组已加载: {path}')
-
-    def _save_alarm_snapshot(self, frame_bgr, roi: RectROI, dwell_time: float) -> Path:
-        self.config.screenshot_dir_path.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        path = self.config.screenshot_dir_path / f'alarm_{roi.name}_{stamp}.jpg'
-        vis = frame_bgr.copy()
-        n = roi.normalized()
-        cv2.rectangle(vis, (n.x1, n.y1), (n.x2, n.y2), (0, 0, 255), 3)
-        cv2.putText(vis, f'ALARM {roi.name} {dwell_time:.1f}s', (max(10, n.x1), max(30, n.y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
-        cv2.imwrite(str(path), vis)
-        return path
-
-    def _write_event_log(self, event_name: str, payload: dict) -> None:
-        try:
-            self.config.event_log_path.parent.mkdir(parents=True, exist_ok=True)
-            event = {
-                'time': datetime.now().isoformat(timespec='seconds'),
-                'event': event_name,
+        track_dicts = self.tracker.update(detections, now=now) if self.cfg.tracker_enabled else []
+        analyses_by_track: dict[int, Any] = {}
+        for tr in track_dicts:
+            tid = int(tr.get("track_id", -1))
+            tdet = {
+                "label": tr.get("label", "hamster"),
+                "class_id": tr.get("class_id", 0),
+                "score": tr.get("score", 0.0),
+                "bbox": tr.get("bbox", [0, 0, 0, 0]),
             }
-            event.update(payload)
-            with self.config.event_log_path.open('a', encoding='utf-8') as f:
-                f.write(json.dumps(event, ensure_ascii=False) + '\n')
-        except Exception as e:
-            self.log(f'事件日志写入失败: {e}')
+            analyses_by_track[tid] = analyze_detection(
+                [tdet],
+                self.rois,
+                frame_w,
+                frame_h,
+                distance_threshold=self.cfg.roi_distance_threshold,
+                iou_threshold=self.cfg.roi_iou_threshold,
+                max_regions=self.cfg.max_description_regions,
+            )
 
-    def _trigger_default_alarm(self, roi: RectROI, dwell_time: float, det_count: int) -> None:
-        QApplication.beep()
-        if self.last_frame is not None:
-            shot = self._save_alarm_snapshot(self.last_frame, roi, dwell_time)
-            self.log(f'报警截图已保存: {shot}')
-        self._write_event_log('roi_dwell_alarm', {
-            'roi_id': roi.roi_id,
-            'roi_name': roi.name,
-            'dwell_time': round(float(dwell_time), 3),
-            'threshold': float(roi.dwell_sec),
-            'det_count': int(det_count),
-            'audio_id': int(getattr(roi, 'audio_id', 1)),
-        })
-        self._play_audio(int(getattr(roi, 'audio_id', 1)), f'默认模式 ROI 报警: {roi.name}')
-        if self.config.alarm_cmd.strip():
-            try:
-                subprocess.Popen(self.config.alarm_cmd, shell=True)
-                self.log(f'已执行报警命令: {self.config.alarm_cmd}')
-            except Exception as e:
-                self.log(f'报警命令执行失败: {e}')
+        stats_summary = self.stats.update(track_dicts, analyses_by_track, now=now)
+        main_track = track_dicts[0] if track_dicts else None
+        main_runtime = None
+        behaviors: list[str] = []
+        if main_track:
+            main_tid = int(main_track["track_id"])
+            main_runtime = stats_summary.get("tracks", {}).get(main_tid)
+            behaviors = self.rules.evaluate(main_runtime)
 
-    def _time_in_work_period(self, dt: datetime) -> bool:
-        start = QTime.fromString(self.work_start, 'HH:mm')
-        end = QTime.fromString(self.work_end, 'HH:mm')
-        now_t = QTime(dt.hour, dt.minute, dt.second)
-        if not start.isValid() or not end.isValid():
-            return True
-        if start <= end:
-            return start <= now_t < end
-        return now_t >= start or now_t < end
+        description = generate_text(primary_analysis, active_track=main_runtime or main_track, behaviors=behaviors)
+        hotspot = generate_hotspot_text(stats_summary.get("top_grids", []), stats_summary.get("top_rois", []))
+        if hotspot:
+            description = f"{description}\n{hotspot}"
 
-    def _meeting_start_room(self, now_ts: float, started_at: float, in_work: bool, trigger_roi: RectROI | None) -> None:
-        if self.release_audio_timer.isActive():
-            self.release_audio_timer.stop()
-        self.meeting_state.in_use = True
-        self.meeting_state.started_at = started_at
-        self.meeting_state.started_in_work_time = in_work
-        self.meeting_state.last_presence_at = now_ts
-        self.meeting_state.long_warned = False
-        self.meeting_state.abnormal_warned = False
-        self.meeting_state.last_abnormal_audio_at = None
-        self._apply_canvas_room_overlay()
+        self._update_first_stage_panel(primary_analysis, fps)
+        self._update_second_stage_panel(track_dicts, main_runtime, behaviors, stats_summary)
+        self._maybe_log_behavior_events(main_runtime, behaviors, description)
 
-        if in_work:
-            self._write_event_log('meeting_room_started', {
-                'started_at_ts': round(float(started_at), 3),
-                'trigger': 'work_time',
-                'roi_name': trigger_roi.name if trigger_roi else None,
-                'work_period': f'{self.work_start}-{self.work_end}',
-            })
-            self._play_audio(1, '会议室已开始使用')
+        tags = list(primary_analysis.description_tags)
+        tags.extend(behaviors)
+        self.video.set_frame(
+            frame_bgr,
+            detections,
+            tracks=track_dicts,
+            analysis_text=description.splitlines()[0],
+            analysis_tags=tags,
+            heatmap=stats_summary.get("grid_dwell", {}),
+        )
+        self.txt_desc.setPlainText(description)
+        self.last_description = description
+
+    def _update_first_stage_panel(self, analysis, fps: float) -> None:
+        self.lbl_detected.setText("是" if analysis.detected else "否")
+        self.lbl_count.setText(str(analysis.count))
+        self.lbl_bbox.setText(str(analysis.bbox) if analysis.bbox else "-")
+        if analysis.center:
+            self.lbl_center.setText(f"({analysis.center[0]:.1f}, {analysis.center[1]:.1f})")
         else:
-            self._write_event_log('meeting_room_nonwork_started', {
-                'started_at_ts': round(float(started_at), 3),
-                'trigger': 'non_work_time',
-                'roi_name': trigger_roi.name if trigger_roi else None,
-                'work_period': f'{self.work_start}-{self.work_end}',
-            })
-            self._play_audio(5, '当前为非工作时间，请尽快离开会议室')
+            self.lbl_center.setText("-")
+        self.lbl_grid.setText(analysis.grid_position)
+        self.lbl_near.setText("、".join(analysis.near_regions) if analysis.near_regions else "-")
+        self.lbl_inside.setText("、".join(analysis.inside_regions) if analysis.inside_regions else "-")
+        self.lbl_fps.setText(f"{fps:.1f}")
 
-    def _meeting_release_room(self, now_ts: float) -> None:
-        if not self.meeting_state.in_use:
+    def _update_second_stage_panel(self, track_dicts, main_runtime, behaviors, stats_summary) -> None:
+        ids = [str(t.get("track_id")) for t in track_dicts]
+        self.lbl_active_ids.setText("、".join(ids) if ids else "-")
+        if main_runtime:
+            tid = main_runtime.get("track_id")
+            self.lbl_main_track.setText(f"ID {tid}")
+            self.lbl_track_age.setText(f"{float(main_runtime.get('age_sec', 0.0)):.1f} s")
+            roi = main_runtime.get("current_roi") or "-"
+            roi_dwell = float(main_runtime.get("current_roi_dwell_sec", 0.0))
+            self.lbl_roi_dwell.setText(f"{roi} / {roi_dwell:.1f} s")
+            grid = main_runtime.get("current_grid") or "-"
+            grid_dwell = float(main_runtime.get("current_grid_dwell_sec", 0.0))
+            self.lbl_grid_dwell.setText(f"{grid} / {grid_dwell:.1f} s")
+        else:
+            self.lbl_main_track.setText("-")
+            self.lbl_track_age.setText("0.0 s")
+            self.lbl_roi_dwell.setText("-")
+            self.lbl_grid_dwell.setText("-")
+        self.lbl_behaviors.setText("、".join(behaviors) if behaviors else "-")
+        self.lbl_running.setText(f"{float(stats_summary.get('running_sec', 0.0)):.1f} s")
+        self.lbl_top_grids.setText(self._format_top(stats_summary.get("top_grids", [])))
+        self.lbl_top_rois.setText(self._format_top(stats_summary.get("top_rois", [])))
+
+    @staticmethod
+    def _format_top(items: list[tuple[str, float]]) -> str:
+        if not items:
+            return "-"
+        return "；".join([f"{name}: {sec:.1f}s" for name, sec in items])
+
+    def _maybe_log_behavior_events(self, runtime: dict[str, Any] | None, behaviors: list[str], description: str) -> None:
+        if not runtime or not behaviors:
             return
+        tid = runtime.get("track_id")
+        now = time.time()
+        for behavior in behaviors:
+            key = f"{tid}:{behavior}"
+            last = self._last_event_key_ts.get(key, 0.0)
+            if now - last < 5.0:
+                continue
+            self._last_event_key_ts[key] = now
+            event = {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "track_id": tid,
+                "behavior": behavior,
+                "runtime": runtime,
+                "description": description,
+            }
+            self._append_event_jsonl(event)
+            self.append_log(f"行为事件：ID {tid} {behavior}")
 
-        occupied_for = max(0.0, now_ts - (self.meeting_state.started_at or now_ts))
+    def _append_event_jsonl(self, event: dict[str, Any]) -> None:
+        p = self.cfg.event_log_path
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
-        # 必须在 reset() 前保存状态
-        started_in_work_time = bool(getattr(self.meeting_state, "started_in_work_time", True))
-        was_abnormal = bool(getattr(self.meeting_state, "abnormal_warned", False))
+    def _reset_stats(self) -> None:
+        self.tracker.reset()
+        self.stats.reset()
+        self._last_event_key_ts.clear()
+        self.append_log("已重置跟踪器和统计数据")
 
-        self._write_event_log('meeting_room_released', {
-            'occupied_for_sec': round(occupied_for, 3),
-            'work_period': f'{self.work_start}-{self.work_end}',
-            'started_in_work_time': started_in_work_time,
-            'was_abnormal': was_abnormal,
-        })
+    def _save_stats(self) -> None:
+        try:
+            self.stats.save_json(self.cfg.stats_json_path)
+            self.append_log(f"统计数据已保存到 {self.cfg.stats_json_path}")
+        except Exception as exc:
+            self.append_log(f"统计保存失败：{exc}")
 
-        # 防止之前遗留的 sd:4 定时器重复触发
-        if self.release_audio_timer.isActive():
-            self.release_audio_timer.stop()
-
-        if started_in_work_time:
-            # 工作时段开始的会议：释放时播放“会议室已空闲”，再延迟播放“会议室无人，请关闭设备”
-            self.log('释放会议室：工作时段占用结束，播放 sd:2，并延迟播放 sd:4')
-            self._play_audio(2, '会议室已空闲')
-            gap_ms = int(self.config.meeting_release_audio_gap_sec * 1000)
-            self.release_audio_timer.start(max(0, gap_ms))
-        else:
-            # 非工作时段开始的会议：释放时不播放“会议室已空闲”，只播放“会议室无人，请关闭设备”
-            self.log('释放会议室：非工作时段占用结束，只播放 sd:4')
-            self._play_audio(4, '非工作时段释放：会议室无人，请关闭设备')
-
-        self.meeting_state.reset()
-        self._apply_canvas_room_overlay()
-
-    def _update_meeting_mode(self, status: dict, detections, now_ts: float) -> None:
-        active_items = []
-        for roi in self.rois:
-            st = status.get(roi.roi_id)
-            if st and st.active:
-                active_items.append((roi, st))
-
-        any_active = bool(active_items)
-        if any_active:
-            self.meeting_state.last_presence_at = now_ts
-
-        in_work = self._time_in_work_period(datetime.now())
-
-        if not self.meeting_state.in_use:
-            for roi, st in active_items:
-                if st.dwell_time >= self.config.meeting_use_start_sec:
-                    started_at = st.entered_at or (now_ts - st.dwell_time)
-                    self._meeting_start_room(now_ts, started_at, in_work, roi)
-                    break
-        else:
-            started_at = self.meeting_state.started_at or now_ts
-            occupied_for = max(0.0, now_ts - started_at)
-
-            if any_active:
-                self.meeting_state.last_presence_at = now_ts
-                if self.meeting_state.started_in_work_time:
-                    if (not self.meeting_state.long_warned) and occupied_for >= self.config.meeting_long_use_sec:
-                        self.meeting_state.long_warned = True
-                        self._write_event_log('meeting_room_long_use', {
-                            'occupied_for_sec': round(occupied_for, 3),
-                            'threshold_sec': self.config.meeting_long_use_sec,
-                        })
-                        self._play_audio(3, '当前会议室已被长时间占用，请注意使用时长')
-                    abnormal_total = self.config.meeting_long_use_sec + self.config.meeting_abnormal_extra_sec
-                else:
-                    abnormal_total = self.config.meeting_use_start_sec + self.config.meeting_abnormal_extra_sec
-
-                if occupied_for >= abnormal_total:
-                    last_abnormal_audio_at = self.meeting_state.last_abnormal_audio_at
-
-                    should_play_abnormal = False
-
-                    # 第一次达到异常占用阈值：立即播放
-                    if not self.meeting_state.abnormal_warned:
-                        should_play_abnormal = True
-
-                    # 已经播过异常占用，但仍然有人占用：
-                    # 每隔 meeting_abnormal_repeat_sec 秒再次播放
-                    elif last_abnormal_audio_at is not None:
-                        if now_ts - last_abnormal_audio_at >= self.config.meeting_abnormal_repeat_sec:
-                            should_play_abnormal = True
-
-                    if should_play_abnormal:
-                        self.meeting_state.abnormal_warned = True
-                        self.meeting_state.last_abnormal_audio_at = now_ts
-
-                        self._write_event_log('meeting_room_abnormal_use', {
-                            'occupied_for_sec': round(occupied_for, 3),
-                            'threshold_sec': abnormal_total,
-                            'repeat_sec': self.config.meeting_abnormal_repeat_sec,
-                            'started_in_work_time': self.meeting_state.started_in_work_time,
-                        })
-
-                        self._play_audio(6, '异常占用持续，请管理员介入')
-                        
-            else:
-                last_presence_at = self.meeting_state.last_presence_at or now_ts
-                if now_ts - last_presence_at >= self.config.meeting_release_empty_sec:
-                    self._meeting_release_room(now_ts)
-
-        self._apply_canvas_room_overlay()
-
-    def on_frame_ready(self, frame_bgr, detections, fps: float) -> None:
-        self.last_frame_ts = time.time()        
-        self.last_frame = frame_bgr.copy()
-        self.frame_size = (frame_bgr.shape[1], frame_bgr.shape[0])
-        now_ts = time.time()
-        status = self.dwell_tracker.update(self.rois, detections, now=now_ts)
-
-        if self.mode == 'default':
-            for roi in self.rois:
-                st = status.get(roi.roi_id)
-                if not st:
-                    continue
-                if roi.alarm_enabled and st.active and not st.alarmed and st.dwell_time >= roi.dwell_sec:
-                    st.alarmed = True
-                    self.log(f'触发报警: {roi.name}, 驻留 {st.dwell_time:.1f}s')
-                    self._trigger_default_alarm(roi, st.dwell_time, len(detections))
-        else:
-            self._update_meeting_mode(status, detections, now_ts)
-
-        self.canvas.set_roi_status(status)
-        self.canvas.set_frame(frame_bgr, detections)
-        det_in_roi = sum(1 for st in status.values() if st.active)
-        self.label_status.setText(f'状态：运行中 | 模式 {self.mode} | FPS {fps:.1f} | DET {len(detections)} | ROI_ACTIVE {det_in_roi}')
-
-    def on_worker_error(self, msg: str) -> None:
-        self.log(msg)
-        QMessageBox.critical(self, '工作线程错误', msg)
-
-    def closeEvent(self, event) -> None:
+    def closeEvent(self, event) -> None:  # noqa: N802
         self.stop_worker()
-        super().closeEvent(event)
+        self._save_rois()
+        event.accept()
